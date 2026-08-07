@@ -165,12 +165,6 @@ function load() {
     if (!state.messages) state.messages = [];
     if (!state.cities) state.cities = CITIES;
     if (!state.settings.feedToken) state.settings.feedToken = crypto.randomBytes(8).toString('hex');
-    if (!Array.isArray(state.outbox)) state.outbox = [];
-    for (const u2 of state.users) {
-      if (u2.emailVerifiedAt === undefined) u2.emailVerifiedAt = u2.createdAt || iso(now()); // legacy pilot accounts grandfathered
-      if (!u2.onboarding) u2.onboarding = { status: 'exempt' };                                  // seeded accounts skip the KYC flow
-      if (u2.plan === undefined) u2.plan = null;
-    }
     if (!state.webhookLog) state.webhookLog = [];
     for (const c of Object.values(state.channels)) if (!c.apiKey) c.apiKey = crypto.randomBytes(12).toString('hex');
     for (const b of Object.values(state.blocks)) if (b.kind === 'booking' && !b.trackingToken) b.trackingToken = uid('trk');
@@ -197,6 +191,16 @@ function load() {
   } catch {
     state = freshState();
     seed();
+  }
+  normalizeState(); // must run for BOTH paths — ephemeral hosts (Render free) hit the freshState branch on every redeploy
+}
+/* account-shape backfill shared by load paths: legacy pilots are verified+exempt, fresh registrants opt in via the gate */
+function normalizeState() {
+  if (!Array.isArray(state.outbox)) state.outbox = [];
+  for (const u2 of state.users) {
+    if (u2.emailVerifiedAt === undefined) u2.emailVerifiedAt = u2.createdAt || iso(now());
+    if (!u2.onboarding) u2.onboarding = { status: 'exempt' };
+    if (u2.plan === undefined) u2.plan = null;
   }
 }
 const driverById = (id) => state.drivers.find((d) => d.id === id);
