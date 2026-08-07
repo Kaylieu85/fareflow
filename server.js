@@ -121,6 +121,7 @@ function freshState() {
     createdAt: iso(now()),
     settings: {
       bufferMin: 15, autoDeclineOverlap: true, autoAccept: false, minPerMile: 2.2,
+      retentionDays: 90, captureKill: true,
       feedToken: crypto.randomBytes(8).toString('hex'),
     },
     drivers: [
@@ -152,6 +153,10 @@ function load() {
     if (!state.users || !state.users.length) state.users = defaultUsers();
     if (!state.supportTickets) state.supportTickets = [];
     if (!state.sessions) state.sessions = {};
+    if (state.settings.retentionDays == null) state.settings.retentionDays = 90;
+    if (state.settings.captureKill == null) state.settings.captureKill = true;
+    if (!state.compliance) state.compliance = { consentAt: null, version: 0, by: null, log: [] };
+    for (const d of state.drivers) { if (d.captureOptIn == null) d.captureOptIn = false; }
     { // driver connections migration
       const defs = defaultConnections();
       for (const d of state.drivers) {
@@ -182,6 +187,7 @@ function publicState() {
   delete clone.sessions;
   delete clone._promoRecent;
   if (clone.users) for (const u of clone.users) { delete u.passwordHash; delete u.salt; }
+  if (clone.drivers) for (const d of clone.drivers) { if (d.deviceKey) { d.deviceKeyMasked = d.deviceKey.slice(0, 8) + '••••••••'; delete d.deviceKey; } }
   return clone;
 }
 function parseCookies(req) {
@@ -451,8 +457,8 @@ function createRequest(o) {
     code: pin4(), externalId: o.externalId || null, source: o.source || 'sim',
     createdAt: iso(now()), expiresAt: iso(new Date(Date.now() + (o.ttlSec || randi(40, 80)) * 1000)), status: 'pending', driverId: null,
   };
-  const driver = routeToDriver(pickupAt, windowEnd, o.channelId);
-  const via = req.source === 'api' ? ' [API]' : '';
+  const driver = o.forceDriver ? driverById(o.forceDriver) : routeToDriver(pickupAt, windowEnd, o.channelId);
+  const via = req.source === 'api' ? ' [API]' : req.source === 'capture' ? ' [on-device]' : '';
   if (!driver) {
     const linkedN = activeDrivers().filter((d) => driverLinked(d, o.channelId)).length;
     if (state.settings.autoDeclineOverlap) {
@@ -463,6 +469,7 @@ function createRequest(o) {
     }
   } else {
     req.driverId = driver.id;
+    if (req.fare == null) req.fare = 0; // defensive: every log path uses toFixed
     if (driver.status === 'on_journey') req.expiresAt = iso(new Date(Date.now() + 20 * 1000)); // quick-fire: 20s to accept while driving
     log('info', `${chCat.name}${via} → ${driver.name.split(' ')[0]}: ${req.rider}, £${req.fare.toFixed(2)} at ${fmtTime(req.pickupAt)}${driver.status === 'on_journey' ? ' — 20s quick-fire (driver is on a journey)' : ''}`);
   }
@@ -474,7 +481,8 @@ function createRequest(o) {
   broadcast('state'); save();
 
   if (req.status === 'pending') notifyRequest(req);
-  if (req.status === 'pending' && req.driverId && state.settings.autoAccept) {
+  /* auto-accept never fires for on-device captured offers — those are confirmed in the platform app by the driver */
+  if (req.status === 'pending' && req.driverId && state.settings.autoAccept && req.source !== 'capture') {
     const ppm = req.fare / req.distanceMi;
     if (ppm >= state.settings.minPerMile) {
       const delay = randi(3500, 8000);
@@ -600,6 +608,32 @@ function parseICS(text) {
   }
   return events;
 }
+
+/* ------------------------------------- privacy retention scrubber (GDPR-safe by default) */
+function privacySweep() {
+  const days = parseInt(state.settings.retentionDays, 10);
+  if (!days) return; // 0 = keep forever
+  const cutoff = new Date(Date.now() - days * 86400000);
+  let scrubbed = 0;
+  for (const b of Object.values(state.blocks)) {
+    if (!['completed', 'cancelled'].includes(b.status) || new Date(b.end) >= cutoff || b.piiScrubbed) continue;
+    if (b.rider) { b.rider = 'Rider · auto-scrubbed'; scrubbed++; }
+    if (b.riderPhone) { b.riderPhone = null; scrubbed++; }
+    if (b.note) { b.note = null; scrubbed++; }
+    b.piiScrubbed = true;
+  }
+  for (const m of state.messages) {
+    if (m.scrubbed || new Date(m.t) >= cutoff) continue;
+    m.body = '[auto-scrubbed — privacy retention]';
+    m.scrubbed = true; scrubbed++;
+  }
+  if (scrubbed) {
+    log('info', `Privacy retention: auto-scrubbed rider details from ${scrubbed} historic item(s) (>${days}d old)`);
+    broadcast('state'); save();
+  }
+}
+setInterval(privacySweep, 60 * 60 * 1000);
+setTimeout(privacySweep, 15000); // also once shortly after boot
 
 /* ------------------------------------------------------- simulator loops */
 let genTimer = null;
@@ -949,7 +983,8 @@ const server = http.createServer(async (req, res) => {
       if (mo) {
         const a = integAuth(mo[1]);
         if (a.err) return send(res, a.code, { error: a.err });
-        const reqObj = createRequest({ channelId: mo[1], source: 'api', externalId: 'test-' + uid('x').slice(2, 8), pickupAt: addMin(now(), randi(60, 300)) });
+        const testDist = +rand(2, 6).toFixed(1);
+        const reqObj = createRequest({ channelId: mo[1], source: 'api', externalId: 'test-' + uid('x').slice(2, 8), pickupAt: addMin(now(), randi(60, 300)), distanceMi: testDist, durationMin: Math.max(8, Math.round(testDist / 16 * 60) + 4), fare: +((3 + testDist * rand(1.9, 2.3)) * CHANNEL_CATALOG[mo[1]].mult).toFixed(2), ttlSec: 45 });
         wlog(mo[1], 'offer.created', 202, `Test offer fired → ${reqObj.rider}`);
         return send(res, 202, { ok: true, requestId: reqObj.id });
       }
@@ -963,7 +998,34 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, apiKey: state.channels[mo[1]].apiKey });
       }
 
-      /* everything below requires a signed-in session (auth/*, integrations and promo are public/keyed) */
+      /* ---- companion-app ingest: offers the DRIVER'S OWN DEVICE saw (read-only capture, GigU model).
+         Key-auth like the operator webhooks — the companion device carries only its device key, no session. ---- */
+      let mc = p.match(/^\/api\/capture\/([\w-]+)\/offers$/);
+      if (mc) {
+        const d = driverById(mc[1]);
+        const key = req.headers['x-fareflow-key'] || '';
+        if (!d || !d.captureOptIn || !d.deviceKey || key !== d.deviceKey) return send(res, 401, { error: 'invalid device key — enable capture in Settings first' });
+        if (state.settings.captureKill) return send(res, 423, { error: 'capture paused — the fleet-wide kill switch is on' });
+        const channelId = String(body.channelId || '').toLowerCase();
+        if (!CHANNEL_CATALOG[channelId] || channelId === 'direct' || channelId === 'manual') return send(res, 400, { error: 'channelId must be a known app (uber, bolt, freenow, gett, veezu, addisonlee)' });
+        const dist = Math.max(0.3, +body.distanceMi || 3);
+        const dur = Math.max(5, parseInt(body.durationMin, 10) || Math.round(dist / 17 * 60) + 4);
+        const pickupAt = body.pickupAt ? new Date(body.pickupAt) : addMin(now(), 15);
+        if (isNaN(pickupAt)) return send(res, 400, { error: 'pickupAt must be an ISO datetime' });
+        const reqObj = createRequest({
+          channelId, source: 'capture', externalId: body.externalId || ('cap-' + uid('x').slice(2, 8)),
+          rider: String(body.rider || 'Rider').slice(0, 60), forceDriver: d.id,
+          pickup: { n: String(body.pickupName || 'Pickup (on-device)').slice(0, 80), pc: '' },
+          dropoff: { n: String(body.dropoffName || 'Drop-off (on-device)').slice(0, 80), pc: '' },
+          pickupAt, distanceMi: dist, durationMin: dur,
+          fare: Math.max(2.5, +body.fare || 0) || 8, ttlSec: Math.min(60, Math.max(10, parseInt(body.ttlSec, 10) || 25)),
+        });
+        d.lastCaptureAt = iso(now());
+        save();
+        return send(res, 202, { requestId: reqObj.id, status: reqObj.status, expiresAt: reqObj.expiresAt, note: 'Mirrored read-only — confirm inside the platform app' });
+      }
+
+      /* everything below requires a signed-in session (auth/*, integrations, capture and promo are public/keyed) */
       const publicPost = p.startsWith('/api/auth/') || p === '/api/promo/link';
       if (!publicPost && gate()) return;
 
@@ -1185,6 +1247,40 @@ const server = http.createServer(async (req, res) => {
         broadcast('state'); save();
         return send(res, 200, { ok: true });
       }
+      /* ---- fair-use consent: required before auto-accept or on-device capture (learned from Para/Mystro) ---- */
+      if (p === '/api/compliance/consent') {
+        const me2 = sessionUser(req);
+        if (!me2) return send(res, 401, { error: 'auth' });
+        if (!body.accept) return send(res, 400, { error: 'accept required' });
+        state.compliance.consentAt = iso(now());
+        state.compliance.version = 1;
+        state.compliance.by = me2.email || me2.id;
+        state.compliance.log.unshift({ t: iso(now()), by: state.compliance.by, version: 1, note: 'Fair-use consent v1 accepted' });
+        if (state.compliance.log.length > 40) state.compliance.log.length = 40;
+        log('ok', `Fair-use terms accepted by ${me2.name.split(' ')[0]} — auto-accept and device capture unlocked`);
+        broadcast('state'); save();
+        return send(res, 200, { ok: true, consentAt: state.compliance.consentAt });
+      }
+      /* ---- on-device capture opt-in: issues a per-driver device key for the companion app ---- */
+      m = p.match(/^\/api\/drivers\/([\w-]+)\/capture$/);
+      if (m) {
+        const d = driverById(m[1]);
+        if (!d) return send(res, 404, { error: 'not found' });
+        const me2 = sessionUser(req);
+        if (me2 && me2.driverId && me2.driverId !== d.id) return send(res, 403, { error: 'You can only manage your own device capture' });
+        if (!state.compliance.consentAt) return send(res, 412, { error: 'consent_required' });
+        const enable = body.enabled !== false;
+        if (enable) {
+          if (!d.deviceKey) d.deviceKey = 'dk_' + crypto.randomBytes(16).toString('hex');
+          d.captureOptIn = true;
+          log('info', `${d.name.split(' ')[0]} enabled on-device capture — offers read on-device only, nothing acts inside platform apps`);
+        } else {
+          d.captureOptIn = false;
+          log('info', `${d.name.split(' ')[0]} switched off on-device capture`);
+        }
+        broadcast('state'); save();
+        return send(res, 200, { ok: true, captureOptIn: d.captureOptIn, deviceKey: d.deviceKey || null });
+      }
       m = p.match(/^\/api\/drivers\/([\w-]+)\/status$/);
       if (m) {
         const d = driverById(m[1]);
@@ -1331,8 +1427,15 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/settings') {
         const s = state.settings;        if (body.bufferMin != null) s.bufferMin = Math.min(60, Math.max(0, parseInt(body.bufferMin, 10) || 0));
         if (body.autoDeclineOverlap != null) s.autoDeclineOverlap = !!body.autoDeclineOverlap;
-        if (body.autoAccept != null) s.autoAccept = !!body.autoAccept;
+        if (body.autoAccept != null) {
+          const want = !!body.autoAccept;
+          if (want && !(state.compliance && state.compliance.consentAt)) return send(res, 412, { error: 'consent_required' });
+          s.autoAccept = want;
+          if (want) log('warn', `Auto-accept enabled (fair-use consent on file) — jobs ≥ £${s.minPerMile.toFixed(2)}/mi accept into the diary automatically`);
+        }
         if (body.minPerMile != null) s.minPerMile = Math.min(10, Math.max(0.5, +body.minPerMile || 0));
+        if (body.retentionDays != null) { s.retentionDays = [0, 30, 90, 365].includes(parseInt(body.retentionDays, 10)) ? parseInt(body.retentionDays, 10) : 90; }
+        if (body.captureKill != null) { s.captureKill = !!body.captureKill; log('warn', `On-device capture ${s.captureKill ? 'PAUSED fleet-wide — no device offers accepted' : 'resumed — opted-in devices can push offers'}`); }
         if (body.regenFeed) {
           s.feedToken = crypto.randomBytes(8).toString('hex');
           log('warn', 'Calendar feed URL regenerated — old links are dead');
@@ -1362,8 +1465,16 @@ const server = http.createServer(async (req, res) => {
 });
 
 load();
-for (const [id, b] of Object.entries(state.blocks)) {
-  if ((b.status === 'completed' || b.status === 'cancelled') && new Date(b.end) < addMin(now(), -14 * 24 * 60)) delete state.blocks[id];
+/* boot janitor: PII is scrubbed at the retention window (privacySweep); blocks themselves are only
+   hard-deleted well beyond it so earnings/history survive. 0 retention = keep forever. */
+{
+  const ret = parseInt(state.settings.retentionDays, 10);
+  if (ret > 0) {
+    const hardDelMin = Math.max(ret, 90) * 24 * 60;
+    for (const [id, b] of Object.entries(state.blocks)) {
+      if ((b.status === 'completed' || b.status === 'cancelled') && new Date(b.end) < addMin(now(), -hardDelMin)) delete state.blocks[id];
+    }
+  }
 }
 save();
 scheduleNextGen(true);

@@ -137,6 +137,7 @@ Subscribe from Google/Apple Calendar via `/api/calendar/<token>.ics?driver=` and
 
 > 📲 **Device install steps + how we'd connect the real (closed-source) ride-hail apps:**
 > see **[TESTING-AND-INTEGRATIONS.md](./TESTING-AND-INTEGRATIONS.md)**.
+> On-device capture & go-to-market strategy (why Para/Mystro/Maxymo failed and how FareFlow hardens against it): **[CAPTURE-COMPANION-PLAN.md](./CAPTURE-COMPANION-PLAN.md)**.
 
 
 `manifest.webmanifest` + `sw.js` + full icon set make it an installable app:

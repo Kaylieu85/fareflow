@@ -1408,13 +1408,21 @@ function renderSettings() {
       </div>
       <div class="panel" style="margin-bottom:16px">
       <h3>Automation rules</h3>
+      ${(() => {
+        const c = S.state.compliance || {};
+        return `<div class="fairuse ${c.consentAt ? 'given' : 'needed'}">
+          <div class="fu-t">${c.consentAt ? '✅ Fair-use terms accepted' : '⚠️ Fair-use terms needed'}</div>
+          <div class="fu-d">${c.consentAt ? `Accepted ${fmtDay(c.consentAt)} ${fmtHM(c.consentAt)}${c.by ? ' by ' + esc(c.by) : ''} — auto-accept & device capture unlocked.` : 'FareFlow never acts inside other companies\u2019 apps without your consent. Accept once to unlock auto-accept and on-device capture.'}</div>
+          ${c.consentAt ? '' : `<button class="btn sm primary" style="margin-top:8px" onclick="openConsent()">Review & accept fair-use terms</button>`}
+        </div>`;
+      })()}
       <div class="switch-row">
         <div class="txt"><div class="t">Auto-decline when no driver is free</div><div class="d">Decline incoming requests that no <b>linked</b> online driver can cover — protects acceptance ratings on every app.</div></div>
         <label class="switch"><input type="checkbox" id="swOverlap" ${s.autoDeclineOverlap ? 'checked' : ''} onchange="saveSwitches()"><span class="sl"></span></label>
       </div>
       <div class="switch-row">
-        <div class="txt"><div class="t">Auto-accept profitable jobs</div><div class="d">Accept requests at or above your minimum £/mile, then block the slot everywhere.</div></div>
-        <label class="switch"><input type="checkbox" id="swAccept" ${s.autoAccept ? 'checked' : ''} onchange="saveSwitches()"><span class="sl"></span></label>
+        <div class="txt"><div class="t">Auto-accept profitable jobs</div><div class="d">Accept requests at or above your minimum £/mile, then block the slot everywhere. <b>Requires fair-use terms.</b></div></div>
+        <label class="switch"><input type="checkbox" id="swAccept" ${s.autoAccept ? 'checked' : ''} onchange="toggleAutoAccept(this)"><span class="sl"></span></label>
       </div>
       <div class="form-row" style="margin-top:14px"><label>Minimum £ per mile</label>
         <input class="input" type="number" step="0.1" min="0.5" id="inPpm" value="${s.minPerMile}" onchange="saveSwitches()">
@@ -1426,19 +1434,112 @@ function renderSettings() {
         <div class="muted" style="font-size:11.5px;margin-top:5px">Applied fleet-wide after every job so back-to-back bookings never overlap — and blocks pushed to all apps include it.</div>
       </div>
       </div>
-      <div class="panel">
+      <div class="panel" style="margin-bottom:16px">
         <h3>Pickup codes</h3>
         <div class="tab-note">Every accepted booking gets a <b>4-digit secret code</b>. It's sent to the rider in their SMS/WhatsApp confirmation and reminder; the driver sees it in the diary and enters the rider's code at pickup to verify both identities. Three wrong attempts would flag rider support. Earnings shows the fleet verification rate.</div>
+      </div>
+      <div class="panel" style="margin-bottom:16px">
+        <h3>Privacy & rider data</h3>
+        <div class="tab-note" style="margin-bottom:10px">Rider names, phone numbers and messages contain personal data. FareFlow <b>auto-scrubs them from completed/cancelled work</b> after your chosen window — bookings, earnings and route history stay intact. This is our GDPR-safe default (data minimisation).</div>
+        <div class="form-row"><label>Auto-scrub rider details after</label>
+          <select class="input" id="inRet" onchange="saveSwitches()">
+            ${[[30, '30 days'], [90, '90 days (recommended)'], [365, '1 year'], [0, 'Never — keep everything (your own risk)']].map(([v, l]) => `<option value="${v}" ${parseInt(s.retentionDays, 10) === v ? 'selected' : ''}>${l}</option>`).join('')}
+          </select>
+        </div>
+        <div class="hint">Scrubbed items show as “Rider · auto-scrubbed”. UK GDPR requires you not to keep personal data longer than needed — 90 days covers tax queries and disputes.</div>
+      </div>
+      <div class="panel">
+        <h3>Companion app — on-device capture 📱</h3>
+        ${(() => {
+          const me2 = S.me || {};
+          const d = me2.driverId ? drv(me2.driverId) : (S.connDriver ? drv(S.connDriver) : null);
+          const consent = S.state.compliance && S.state.compliance.consentAt;
+          if (!d) return `<div class="tab-note">Driver accounts can link a companion device that <b>reads offers on the driver's own screen</b> (notifications/overlay — never touching the apps' servers) and mirrors them here. This read-only model is the legally-defended one used abroad; FareFlow never automates inside platform apps. Switch to a driver or fleet sign-in to manage capture.</div>`;
+          return `${!consent ? `<div class="fairuse needed" style="margin-bottom:10px"><div class="fu-t">⚠️ Fair-use terms required first</div><div class="fu-d">Capture reads only what is already on the driver's device — nothing logs into or taps inside Uber/Bolt apps.</div><button class="btn sm primary" style="margin-top:8px" onclick="openConsent()">Review & accept</button></div>` : `
+          <div class="switch-row">
+            <div class="txt"><div class="t">${esc(d.name.split(' ')[0]) + '’s companion device'}</div><div class="d">${d.captureOptIn ? ('🟢 Capture active — offers this device sees pop in the diary (read-only mirror). ' + (d.lastCaptureAt ? 'Last seen ' + fmtDay(d.lastCaptureAt) + ' ' + fmtHM(d.lastCaptureAt) + '.' : 'Waiting for first offer…')) : 'Off — nothing is captured.'}</div></div>
+            <label class="switch"><input type="checkbox" ${d.captureOptIn ? 'checked' : ''} onchange="toggleCapture(this.checked)"><span class="sl"></span></label>
+          </div>
+          ${d.captureOptIn && d.deviceKeyMasked ? `<div class="mono" style="font-size:12px;background:var(--card3);border-radius:8px;padding:8px 10px;margin-top:8px">Device key: ${esc(d.deviceKeyMasked)} <span class="muted">(shown in full once, when enabled)</span></div>` : ''}
+          `}
+          <div class="switch-row" style="margin-top:6px">
+            <div class="txt"><div class="t">⛔ Fleet-wide capture kill switch</div><div class="d">Instantly stops every companion device accepting new captures — one tap if any platform pushes back.</div></div>
+            <label class="switch"><input type="checkbox" ${s.captureKill ? 'checked' : ''} onchange="saveSwitches()" id="swCaptureKill"><span class="sl"></span></label>
+          </div>`;
+        })()}
       </div>
     </div>
   </div>`;
 }
 async function saveSwitches() {
-  await api('/api/settings', 'POST', {
-    autoDeclineOverlap: $('#swOverlap').checked, autoAccept: $('#swAccept').checked,
-    minPerMile: parseFloat($('#inPpm').value) || 2.2, bufferMin: parseInt($('#inBuf').value, 10),
-  });
-  toast('Rules updated', 'ok'); refresh();
+  const el = (id) => document.getElementById(id);
+  const body = {
+    autoDeclineOverlap: el('swOverlap') ? el('swOverlap').checked : S.state.settings.autoDeclineOverlap,
+    autoAccept: S.state.settings.autoAccept,
+    minPerMile: el('inPpm') ? (parseFloat(el('inPpm').value) || 2.2) : S.state.settings.minPerMile,
+    bufferMin: el('inBuf') ? parseInt(el('inBuf').value, 10) : S.state.settings.bufferMin,
+  };
+  if (el('inRet')) body.retentionDays = parseInt(el('inRet').value, 10);
+  if (el('swCaptureKill')) body.captureKill = el('swCaptureKill').checked;
+  try { await api('/api/settings', 'POST', body); toast('Settings updated', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+  refresh();
+}
+/* auto-accept is gated behind fair-use consent (the Para/Mystro lesson) */
+async function toggleAutoAccept(input) {
+  const want = !!input.checked;
+  input.checked = !want; /* revert until the server confirms */
+  if (!want) { try { await api('/api/settings', 'POST', { autoAccept: false }); toast('Auto-accept off', 'warn'); } catch (e) { toast(e.message, 'err'); } refresh(); return; }
+  const consented = S.state.compliance && S.state.compliance.consentAt;
+  if (!consented) { openConsent(() => toggleAutoAccept({ checked: true })); return; }
+  try { await api('/api/settings', 'POST', { autoAccept: true }); toast('⚡ Auto-accept on — profitable jobs book themselves', 'ok'); }
+  catch (e) { if (e.status === 412 || /consent/i.test(e.message)) openConsent(() => toggleAutoAccept({ checked: true })); else toast(e.message, 'err'); }
+  refresh();
+}
+function openConsent(onDone) {
+  openModal(`
+    <h2>Fair-use terms — please read</h2>
+    <div class="consent-body">
+      <p><b>What FareFlow is:</b> a diary and channel manager for the jobs you already receive. It never logs into, scrapes, or acts inside Uber, Bolt, FREE NOW or any other company's app or servers.</p>
+      <p><b>On-device capture</b> (optional, per driver) only reads what is already shown on <i>your own phone</i> and mirrors it here read-only. You always confirm inside the platform app — the same model that withstood legal challenge elsewhere.</p>
+      <p><b>Your responsibilities:</b> you remain bound by each platform's terms and by UK private-hire licensing law. Automation here acts only on your FareFlow diary; keep your acceptance rates healthy, verify riders with their pickup code, and use the fleet-wide capture kill switch if any platform objects to your setup.</p>
+      <p><b>Privacy:</b> rider personal details are auto-scrubbed after your chosen retention window (Settings → Privacy). We never sell rider or driver data.</p>
+    </div>
+    <label class="consent-check"><input type="checkbox" id="consentChk"> I understand FareFlow is a read-and-organise tool, I keep my platform accounts compliant myself.</label>
+    <div class="m-actions">
+      <button class="btn accept" onclick="acceptConsent()">Accept & continue</button>
+      <button class="btn" onclick="closeModal()">Not now</button>
+    </div>`);
+  openConsent._onDone = onDone || null;
+}
+async function acceptConsent() {
+  if (!($('#consentChk') && $('#consentChk').checked)) return toast('Tick the box to accept', 'warn');
+  try {
+    await api('/api/compliance/consent', 'POST', { accept: true });
+    closeModal();
+    toast('✅ Fair-use terms accepted — features unlocked', 'ok');
+    if (openConsent._onDone) setTimeout(openConsent._onDone, 200);
+  } catch (e) { toast(e.message, 'err'); }
+  refresh();
+}
+async function toggleCapture(enable) {
+  const d = myDriver() || (S.connDriver ? drv(S.connDriver) : null);
+  if (!d) return toast('Pick a driver first', 'warn');
+  try {
+    const r = await api(`/api/drivers/${d.id}/capture`, 'POST', { enabled: enable });
+    toast(enable ? '📱 On-device capture enabled' : 'On-device capture off', enable ? 'ok' : 'warn');
+    if (enable && r.deviceKey) {
+      openModal(`
+        <h2>Companion device key — save it now</h2>
+        <div class="tab-note" style="margin-bottom:10px">Enter this in the FareFlow companion app on ${esc(d.name.split(' ')[0])}'s phone. <b>It is shown in full only once.</b> It only lets the phone mirror offers it already sees — it cannot act inside platform apps.</div>
+        <div class="mono" style="font-size:14px;word-break:break-all;background:var(--card3);border-radius:10px;padding:12px">${esc(r.deviceKey)}</div>
+        <div class="m-actions"><button class="btn accept" onclick="(function(){navigator.clipboard&&navigator.clipboard.writeText('${r.deviceKey}');toast('Key copied','ok')})()">Copy key</button><button class="btn" onclick="closeModal()">Done</button></div>`);
+    }
+  } catch (e) {
+    if (e.status === 412 || /consent/i.test(e.message)) openConsent(() => toggleCapture(enable));
+    else toast(e.message, 'err');
+  }
+  refresh();
 }
 function copyFeedUrl() {
   const el = $('#feedUrl');
@@ -1803,6 +1904,8 @@ const FAQ_ITEMS = [
   ['Why did my job decline itself?', 'Two possibilities: the offer expired (offers live 40–80 seconds, like the real apps), or a clashing booking existed — clashing offers are politely declined to protect your acceptance rating.'],
   ['What is the 4-digit pickup code?', 'Every booking gets a code. The rider sees it in their confirmation text and tracking page; they show it at the door, you tap <b>Verify pickup</b> in the booking — proving identity on both sides and stopping wrong-car pickups.'],
   ['Do riders need to install anything?', 'Never. They get a text with a tracking link that opens in any browser: live ETA, your vehicle and reg, and their pickup code in big digits.'],
+  ['Is FareFlow allowed? Will my platform accounts be banned?', 'FareFlow is a diary and channel manager — it never logs into, reads, or acts inside Uber, Bolt, FREE NOW or any other app. Official integrations go through licensed operator APIs; the optional companion feature is <b>read-only on your own device</b>, the model that has survived legal challenge abroad, and it is off until you opt in with a device key. You always confirm jobs inside the platform apps themselves. Automation (auto-accept) only works inside your FareFlow diary and requires you to accept the fair-use terms in Settings first. You stay responsible for your own platform accounts and licences.'],
+  ['What rider data do you keep — and for how long?', 'Only what your bookings need: rider first name, pickup/drop-off, and the phone number you gave for texts. <b>Privacy retention auto-scrubs</b> rider names, numbers and message bodies from completed or cancelled work after your chosen window (default 90 days) while earnings and route history stay for your accounts. Change it in Settings → Privacy & rider data. We never sell rider or driver data.'],
   ['What does the demand heatmap show?', 'Hour-by-hour demand per channel across the week — your own booking history blended with typical city rhythms. Park yourself where the ▓bright white▓ hours are.'],
   ['How do I put my diary in Google/Apple Calendar?', 'Diary → <b>⇅ Calendar feed</b> → copy your URL and subscribe from your calendar app. You can also import an .ics file the other way — school runs and MOTs then block every app automatically.'],
   ['Why do I occasionally see "Waking FareFlow up"?', 'This demo runs on free hosting that naps after ~15 quiet minutes — the first visit takes up to a minute to wake it, and the app retries automatically. On paid hosting it never happens.'],
