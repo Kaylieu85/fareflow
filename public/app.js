@@ -175,22 +175,43 @@ function popBooking(b) {
       <div class="bp-route">${esc(b.pickup)} → ${esc(b.dropoff)}</div>
       <div class="bp-when">${fmtDay(b.start)} · pickup ${fmtHM(b.start)}${b.distanceMi ? ` · ${b.distanceMi} mi` : ''}${b.code ? ` · pickup code <b>${esc(String(b.code))}</b>` : ''}</div>
     </div>
-    <div class="bp-actions"><button class="bp-view">Open in diary →</button></div>
+    <div class="bp-actions">${(() => {
+      const live = S.state.blocks[b.id];
+      const d = live && drv(live.driverId);
+      const canStart = live && live.kind === 'booking' && live.driverId !== 'all' && d && d.status !== 'on_journey'
+        && (live.status === 'confirmed' || live.status === 'in-progress')
+        && ((S.me && S.me.driverId === live.driverId) || isAdmin());
+      return canStart ? `<button class="bp-view">▶ Start journey — navigate</button>` : `<button class="bp-view">Open in diary →</button>`;
+    })()}</div>
     <div class="bp-bar"><i></i></div>`;
   const kill = () => { el.classList.add('out'); setTimeout(() => el.remove(), 380); };
   el.querySelector('.bp-x').onclick = kill;
-  el.querySelector('.bp-view').onclick = () => { kill(); jumpToBooking(b.id, b.start); };
+  el.querySelector('.bp-view').onclick = () => {
+    kill();
+    const live = S.state.blocks[b.id];
+    if (el.querySelector('.bp-view').textContent.startsWith('▶')) { if (live) startJourney(b.id); }
+    else jumpToBooking(b.id, b.start);
+  };
   root.appendChild(el);
   setTimeout(() => { if (el.isConnected) kill(); }, 14000);
 }
 
 /* --------------------------------------------------- journey mode (safety lock) */
 const myDriver = () => (S.me && S.me.driverId && S.state) ? S.state.drivers.find((d) => d.id === S.me.driverId) || null : null;
+const isAdmin = () => !!(S.me && !S.me.driverId);
 function journeyBlock() {
+  if (!S.state) return null;
   const d = myDriver();
-  if (!d || d.status !== 'on_journey' || !d.journeyBlockId) return null;
-  const b = S.state.blocks[d.journeyBlockId];
-  return b && b.status === 'on_journey' ? b : null;
+  if (d && d.status === 'on_journey' && d.journeyBlockId) {
+    const b = S.state.blocks[d.journeyBlockId];
+    if (b && b.status === 'on_journey') return b;
+  }
+  if (isAdmin()) {
+    /* fleet/admin console mirrors the journey it started (fallback: any live journey, e.g. for demo playback) */
+    const js = Object.values(S.state.blocks).filter((b) => b.kind === 'booking' && b.status === 'on_journey');
+    return js.find((b) => b.journey && b.journey.startedBy === S.me.id) || js[0] || null;
+  }
+  return null;
 }
 const journeyActive = () => !!journeyBlock();
 const placeQ = (p) => (p ? [p.n, p.pc].filter(Boolean).join(', ') : '');
@@ -621,9 +642,10 @@ function openBlockModal(id) {
     ${holds.length ? holds.map(holdRow).join('') : '<div class="muted" style="font-size:13px">No other channels connected — nothing to sync.</div>'}
     <div class="m-actions">
       ${(() => {
+        const driver = drv(b.driverId);
         const mine = S.me && S.me.driverId && b.driverId === S.me.driverId;
-        const busy = myDriver() && myDriver().status === 'on_journey';
-        if (b.kind === 'booking' && mine && (b.status === 'confirmed' || b.status === 'in-progress') && !busy) {
+        const dBusy = driver && driver.status === 'on_journey' && driver.journeyBlockId !== b.id;
+        if (b.kind === 'booking' && (mine || isAdmin()) && b.driverId !== 'all' && driver && (b.status === 'confirmed' || b.status === 'in-progress') && !dBusy) {
           return `<button class="btn journey" onclick="startJourney('${b.id}')">▶ Start journey — navigate to pickup</button>`;
         }
         if (b.status === 'on_journey') return `<div class="journey-flag">🚗 ON JOURNEY — the app is locked for safety. Use the journey screen to complete the job.</div>`;

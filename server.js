@@ -1101,7 +1101,7 @@ const server = http.createServer(async (req, res) => {
           if (b.status !== 'confirmed' && b.status !== 'in-progress') return send(res, 409, { error: `This job is ${b.status.replace('_', ' ')} — it can’t be started` });
           if (d.status === 'on_journey' && d.journeyBlockId && d.journeyBlockId !== b.id) return send(res, 409, { error: `${first} is already on a journey — complete it first` });
           b.status = 'on_journey';
-          b.journey = { startedAt: iso(now()), leg: 'to_pickup', pickedUpAt: null };
+          b.journey = { startedAt: iso(now()), leg: 'to_pickup', pickedUpAt: null, startedBy: me2 ? me2.id : null };
           d.status = 'on_journey'; d.journeyBlockId = b.id;
           log('ok', `🚗 ${first} started the journey — heading to pickup (${placeName(b.pickup) || 'pickup'}). App locked for safety; new offers pop for 20s only.`);
         } else if (action === 'leg') {
