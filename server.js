@@ -12,6 +12,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const LEGAL = require('./legal');
 
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
@@ -31,7 +32,18 @@ const overlaps = (aS, aE, bS, bE) => new Date(aS) < new Date(bE) && new Date(aE)
 const fmtTime = (ts) => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
 const fmtDate = (d) => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + d.getDate();
 const pin4 = () => String(randi(1000, 9999));
-const hashPw = (salt, pw) => crypto.createHash('sha256').update(salt + '::' + pw).digest('hex');
+const hashPw = (salt, pw) => crypto.createHash('sha256').update(salt + '::' + pw).digest('hex'); // legacy — upgraded transparently on next login
+/* scrypt (memory-hard, per-user salt) — the only algo for new/changed passwords */
+const hashPwScrypt = (salt, pw) => crypto.scryptSync(String(pw), salt, 32).toString('hex');
+/* returns { ok, upgraded } — verifies against either algo, flags legacy hashes for upgrade */
+function verifyPw(u, pw) {
+  if (u.pwAlgo === 'scrypt') {
+    const h = Buffer.from(hashPwScrypt(u.salt, pw), 'hex');
+    const stored = Buffer.from(String(u.passwordHash || ''), 'hex');
+    return { ok: stored.length === h.length && crypto.timingSafeEqual(stored, h), upgraded: false };
+  }
+  return { ok: u.passwordHash === hashPw(u.salt, pw), upgraded: true };
+}
 const normEmail = (e) => String(e || '').trim().toLowerCase();
 const normPhone = (p) => String(p || '').replace(/[^\d+]/g, '');
 
@@ -90,7 +102,7 @@ const DRIVER_COLORS = ['#38BDF8', '#A3E635', '#F472B6', '#FBBF24', '#C084FC', '#
 /* ---------------------------------------------------------------- state */
 function mkUser(id, name, email, phone, pw, driverId) {
   const salt = uid('s');
-  return { id, name, email: email ? normEmail(email) : null, phone: phone ? normPhone(phone) : null, passwordHash: hashPw(salt, pw), salt, driverId, createdAt: iso(now()) };
+  return { id, name, email: email ? normEmail(email) : null, phone: phone ? normPhone(phone) : null, passwordHash: hashPwScrypt(salt, pw), pwAlgo: 'scrypt', salt, driverId, createdAt: iso(now()) };
 }
 function defaultUsers() {
   return [
@@ -823,9 +835,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/state' && req.method === 'GET') {
       if (gate()) return;
-      return send(res, 200, { state: publicState(), serverTime: iso(now()), me: { id: user.id, name: user.name, email: user.email, phone: user.phone, driverId: user.driverId } });
+      return send(res, 200, { state: publicState(), serverTime: iso(now()), me: { id: user.id, name: user.name, email: user.email, phone: user.phone, driverId: user.driverId, legal: user.legal || null } });
     }
     if (p === '/api/health') return send(res, 200, { ok: true });
+    /* legal documents — public, no session needed */
+    if (p === '/api/legal' && req.method === 'GET') {
+      return send(res, 200, { tosVersion: LEGAL.TOS_VERSION, privacyVersion: LEGAL.PRIVACY_VERSION, updated: LEGAL.UPDATED, terms: LEGAL.TERMS_HTML, privacy: LEGAL.PRIVACY_HTML });
+    }
+    if ((p === '/terms' || p === '/privacy') && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(LEGAL.legalPage(p === '/terms' ? 'terms' : 'privacy'));
+    }
     if (p === '/api/demand' && req.method === 'GET') { if (gate()) return; return send(res, 200, buildDemand()); }
 
     /* ---- public rider tracking ---- */
@@ -887,13 +907,15 @@ const server = http.createServer(async (req, res) => {
         const u = state.users.find((x) =>
           (idf.includes('@') && x.email === normEmail(idf)) ||
           (!idf.includes('@') && x.phone && x.phone === normPhone(idf)));
-        if (!u || u.passwordHash !== hashPw(u.salt, pw)) {
+        const chk = u ? verifyPw(u, pw) : { ok: false };
+        if (!u || !chk.ok) {
           return send(res, 401, { error: 'Those details don’t match an account — check the email/number and password' });
         }
+        if (chk.upgraded && u.pwAlgo !== 'scrypt') { u.passwordHash = hashPwScrypt(u.salt, pw); u.pwAlgo = 'scrypt'; } // transparent security upgrade
         startSession(res, u);
         log('info', `${u.name} signed in`);
         save();
-        return send(res, 200, { ok: true, me: { id: u.id, name: u.name, email: u.email, phone: u.phone, driverId: u.driverId } });
+        return send(res, 200, { ok: true, me: { id: u.id, name: u.name, email: u.email, phone: u.phone, driverId: u.driverId, legal: u.legal || null } });
       }
       if (p === '/api/support/tickets') {
         const subject = String(body.subject || '').trim().slice(0, 120);
@@ -914,7 +936,8 @@ const server = http.createServer(async (req, res) => {
         const pw = String(body.password || '');
         if (!name) return send(res, 400, { error: 'Your name is required' });
         if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return send(res, 400, { error: 'A valid email is required' });
-        if (!pw || pw.length < 6) return send(res, 400, { error: 'Password must be at least 6 characters' });
+        if (!pw || pw.length < 8 || !/[A-Za-z]/.test(pw) || !/\d/.test(pw)) return send(res, 400, { error: 'Password must be 8+ characters with at least one letter and one number' });
+        if (body.agree !== true) return send(res, 400, { error: 'consent_required', message: 'Please accept the Terms & Conditions and Privacy Policy to create an account' });
         if (state.users.some((x) => x.email === email)) return send(res, 409, { error: 'An account with that email already exists — sign in instead' });
         if (phone && state.users.some((x) => x.phone === phone)) return send(res, 409, { error: 'An account with that number already exists' });
         const drvId = uid('drv');
@@ -923,11 +946,12 @@ const server = http.createServer(async (req, res) => {
           color: DRIVER_COLORS[state.drivers.length % DRIVER_COLORS.length], status: 'online', home: CITIES.london, connections: {},
         });
         const u = mkUser(uid('usr'), name, email, phone, pw, drvId);
+        u.legal = { tos: LEGAL.TOS_VERSION, tosAt: iso(now()), privacy: LEGAL.PRIVACY_VERSION, privacyAt: iso(now()) };
         state.users.push(u);
         startSession(res, u);
-        log('ok', `${name} created an account and joined the fleet — link their app driver numbers in Settings`);
+        log('ok', `${name} created an account and joined the fleet — accepted Terms v${LEGAL.TOS_VERSION} & Privacy v${LEGAL.PRIVACY_VERSION}; link their app driver numbers in Settings`);
         broadcast('state'); save();
-        return send(res, 200, { ok: true, me: { id: u.id, name: u.name, email: u.email, phone: u.phone, driverId: u.driverId } });
+        return send(res, 200, { ok: true, me: { id: u.id, name: u.name, email: u.email, phone: u.phone, driverId: u.driverId, legal: u.legal } });
       }
       if (p === '/api/auth/logout') {
         const tok = parseCookies(req).ff_session;

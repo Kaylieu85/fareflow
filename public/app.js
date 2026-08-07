@@ -1407,6 +1407,23 @@ function renderSettings() {
         <button class="btn" onclick="openCalModal()">Open calendar tools (export / import / reset link)</button>
       </div>
       <div class="panel" style="margin-bottom:16px">
+      <h3>Legal documents &amp; your consent record</h3>
+      ${(() => {
+        const lg = S.me && S.me.legal;
+        return `<div class="fairuse ${lg ? 'given' : 'needed'}">
+          <div class="fu-t">${lg ? '✅ Agreements on file' : '⚠️ No signed agreements recorded for this account'}</div>
+          <div class="fu-d">${lg
+            ? `Terms &amp; Conditions v${esc(lg.tos)} — accepted ${fmtDay(lg.tosAt)} ${fmtHM(lg.tosAt)}<br>Privacy &amp; Data Security Policy v${esc(lg.privacy)} — accepted ${fmtDay(lg.privacyAt)} ${fmtHM(lg.privacyAt)}`
+            : 'Seeded pilot accounts predate the consent ledger; new registrations sign Terms and Privacy at account creation.'}</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="btn sm" onclick="window.open('/terms','_blank')">📄 Terms &amp; Conditions of Use</button>
+          <button class="btn sm" onclick="window.open('/privacy','_blank')">🔒 Privacy &amp; Data Security Policy</button>
+        </div>
+        <div class="muted" style="font-size:11.5px;margin-top:8px">Rider personal details are auto-scrubbed at your Privacy retention setting (see below). FareFlow never sells or shares personal data — GDPR UK compliant by design.</div>`;
+      })()}
+      </div>
+      <div class="panel" style="margin-bottom:16px">
       <h3>Automation rules</h3>
       ${(() => {
         const c = S.state.compliance || {};
@@ -1823,7 +1840,11 @@ function showRegister() {
           <div class="form-row"><label>Full name</label><input class="input" id="regName" placeholder="Jordan Blake" required></div>
           <div class="form-row"><label>Email</label><input class="input" id="regEmail" type="email" autocomplete="email" placeholder="you@example.co.uk" required></div>
           <div class="form-row"><label>Mobile number <span class="muted">(optional — also works as your login)</span></label><input class="input" id="regPhone" type="tel" autocomplete="tel" placeholder="+44 7…"></div>
-          <div class="form-row"><label>Password</label><input class="input" id="regPw" type="password" autocomplete="new-password" placeholder="6+ characters" minlength="6" required></div>
+          <div class="form-row"><label>Password</label><input class="input" id="regPw" type="password" autocomplete="new-password" placeholder="8+ chars, a letter and a number" minlength="8" required></div>
+          <label style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;color:var(--mut);margin:2px 0 10px;cursor:pointer">
+            <input type="checkbox" id="regAgree" style="margin-top:2.5px;accent-color:#38BDF8;width:15px;height:15px;flex:none">
+            <span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms &amp; Conditions of Use</a> and the <a href="/privacy" target="_blank" rel="noopener">Privacy &amp; Data Security Policy</a>, and confirm I hold (or work under) valid UK private-hire licensing.</span>
+          </label>
           <div class="auth-err" id="authErr"></div>
           <button class="btn primary" style="width:100%;justify-content:center;padding:13px" type="submit">Create account &amp; sign in →</button>
         </form>
@@ -1855,9 +1876,10 @@ async function doLogin(e) {
 }
 async function doRegister(e) {
   e.preventDefault();
+  if (!$('#regAgree').checked) { authError('Please accept the Terms & Conditions and Privacy Policy to create your account'); return false; }
   try {
     const { me } = await api('/api/auth/register', 'POST', {
-      name: $('#regName').value, email: $('#regEmail').value, phone: $('#regPhone').value, password: $('#regPw').value,
+      name: $('#regName').value, email: $('#regEmail').value, phone: $('#regPhone').value, password: $('#regPw').value, agree: true,
     });
     S.me = me;
     const { state, serverTime } = await api('/api/state');
