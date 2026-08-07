@@ -679,3 +679,32 @@ a.jl-apple{display:inline-block;align-self:center;margin-top:8px;font-size:12px;
 .jl-note{margin-top:14px;font-size:12px;line-height:1.55;color:var(--muted);background:rgba(251,191,36,.07);border:1px dashed rgba(251,191,36,.4);border-radius:12px;padding:10px 12px}
 .jl-abort{margin-top:12px;background:none;border:none;color:var(--muted);font-size:12px;text-decoration:underline;cursor:pointer;font-family:inherit;padding:6px}
 @media(max-width:520px){.jl-elapsed{font-size:38px}}
+
+/* ============================ duty status chip + picker ============================ */
+.duty-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:99px;border:1px solid var(--line2);
+  font-family:inherit;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;transition:transform .12s, filter .12s}
+.duty-chip:hover{transform:translateY(-1px);filter:brightness(1.12)}
+.duty-chip.online{background:rgba(52,211,153,.14);border-color:rgba(52,211,153,.5);color:#34D399}
+.duty-chip.on_job{background:rgba(59,130,246,.14);border-color:rgba(59,130,246,.5);color:#60A5FA}
+.duty-chip.break{background:rgba(167,139,250,.14);border-color:rgba(167,139,250,.5);color:#A78BFA}
+.duty-chip.offline{background:rgba(100,116,139,.14);border-color:rgba(100,116,139,.5);color:#94A3B8}
+.duty-chip.on_journey{background:rgba(251,191,36,.14);border-color:rgba(251,191,36,.55);color:#FBBF24;animation:jlBlink 1.6s ease-in-out infinite}
+.duty-list{display:flex;flex-direction:column;gap:9px;margin-bottom:12px}
+.duty-opt{display:flex;align-items:center;gap:13px;width:100%;padding:13px 14px;border-radius:13px;text-align:left;
+  background:var(--card2);border:1.5px solid var(--line2);cursor:pointer;font-family:inherit;color:var(--text);transition:border-color .12s, background .12s}
+.duty-opt:hover{border-color:var(--accent)}
+.duty-opt.cur{border-color:var(--ok);background:rgba(52,211,153,.08)}
+.duty-opt .d-ico{font-size:21px}
+.duty-opt .d-txt{flex:1;display:flex;flex-direction:column;gap:2px}
+.duty-opt .d-txt b{font-size:14.5px}
+.duty-opt .d-txt span{font-size:12px;color:var(--muted)}
+.d-tick{color:var(--ok);font-weight:900;font-size:16px}
+.duty-break{border:1.5px solid var(--line2);border-radius:13px;padding:13px 14px;background:var(--card2)}
+.duty-break.cur{border-color:#A78BFA;background:rgba(167,139,250,.08)}
+.duty-break-head{display:flex;align-items:center;gap:10px;font-size:14.5px}
+.duty-break-head .d-tick{margin-left:auto}
+.duty-break-desc{font-size:12px;color:var(--muted);margin:6px 0 10px;line-height:1.5}
+.duty-break-btns{display:flex;flex-wrap:wrap;gap:8px}
+.duty-sel{padding:7px 10px;border-radius:9px;background:var(--card3);border:1px solid var(--line2);color:var(--text);
+  font-family:inherit;font-size:12.5px;font-weight:700;cursor:pointer}
+@media(max-width:820px){.duty-chip{font-size:11px;padding:5px 9px}}

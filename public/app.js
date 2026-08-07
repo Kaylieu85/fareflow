@@ -1,6 +1,15 @@
 /* FareFlow client — fleet channel manager SPA ------------------------------------ */
 const S = { state: null, route: 'diary', weekOffset: 0, driverFilter: 'all', es: null, serverTimeOffset: 0, authed: false, me: null, connDriver: null, reqQueue: [] };
 const EXTRA_CH = { manual: { id: 'manual', name: 'Manual block', color: '#94A3B8' } };
+/* driver duty statuses — Accepting is the only one that receives routed offers */
+const DRV_STATUS = {
+  online:     { label: 'Accepting',  icon: '🟢', pill: 'ok',   mapColor: null },
+  on_job:     { label: 'On job',     icon: '🚕', pill: 'info', mapColor: '#3B82F6' },
+  break:      { label: 'On break',   icon: '☕', pill: 'warn', mapColor: '#A78BFA' },
+  offline:    { label: 'Offline',    icon: '⚫', pill: 'mut',  mapColor: '#3D5478' },
+  on_journey: { label: 'On journey', icon: '🚗', pill: 'warn', mapColor: '#FBBF24' },
+};
+const drvStatus = (d) => DRV_STATUS[d && d.status] || DRV_STATUS.offline;
 
 /* ------------------------------------------------------------------ helpers */
 const $ = (sel, el = document) => el.querySelector(el ? sel : sel);
@@ -400,6 +409,16 @@ function render() {
   const mb = $('#masterBtn');
   mb.textContent = online ? 'Go offline everywhere' : 'Back online everywhere';
   mb.className = 'master ' + (online ? 'online-state' : 'offline-state');
+  const sc = document.getElementById('statusChipWrap');
+  if (sc) {
+    const meD = myDriver();
+    if (!meD) { sc.innerHTML = ''; }
+    else {
+      const st = drvStatus(meD);
+      const breakLeft = meD.status === 'break' && meD.breakUntil ? ' · back ' + fmtHM(meD.breakUntil) : '';
+      sc.innerHTML = `<button class="duty-chip ${meD.status}" id="statusChip" onclick="openStatusPicker()" title="Your duty status — tap to change">${st.icon} ${st.label}${breakLeft} ▾</button>`;
+    }
+  }
   const uc = document.getElementById('userChip');
   if (uc) uc.innerHTML = S.me
     ? `<span class="user-chip" onclick="openProfile()" title="Your profile — FAQ, how-to, support">
@@ -428,7 +447,7 @@ function driverFilterChips() {
   return `<div class="drv-filters">
     <span class="drv-f ${S.driverFilter === 'all' ? 'on' : ''}" onclick="setDriverFilter('all')">👥 Everyone</span>
     ${S.state.drivers.map((d) => `<span class="drv-f ${S.driverFilter === d.id ? 'on' : ''}" onclick="setDriverFilter('${d.id}')">
-      <span class="cdot" style="background:${d.color}"></span>${esc(d.name)}${d.status === 'on_journey' ? ' 🚗' : d.status !== 'online' ? ' (off)' : ''}</span>`).join('')}
+      <span class="cdot" style="background:${d.color}"></span>${esc(d.name)}${d.status !== 'online' ? ' ' + drvStatus(d).icon : ''}</span>`).join('')}
   </div>`;
 }
 function setDriverFilter(id) { S.driverFilter = id; render(); }
@@ -473,7 +492,7 @@ function renderDiary() {
   let lanes;
   if (S.driverFilter === 'all') {
     lanes = S.state.drivers
-      .filter((d) => d.status === 'online' || d.status === 'on_journey' || allFiltered.some((b) => b.driverId === d.id))
+      .filter((d) => ['online', 'on_journey', 'on_job'].includes(d.status) || allFiltered.some((b) => b.driverId === d.id))
       .map((d) => d.id);
     if (!lanes.length) lanes = S.state.drivers.map((d) => d.id);
     if (allFiltered.some((b) => b.driverId === 'all')) lanes = ['all', ...lanes];
@@ -704,11 +723,12 @@ function renderRequests() {
         <select class="mini" onchange="assignReq('${r.id}', this.value)">
           ${r.driverId ? '' : '<option value="" selected disabled>Assign a driver…</option>'}
           ${S.state.drivers.map((d) => {
-            const off = d.status === 'offline';
+            const off = ['offline', 'on_job', 'break'].includes(d.status);
             const onJ = d.status === 'on_journey';
+            const offLbl = d.status === 'offline' ? ' (offline)' : d.status === 'on_job' ? ' (🚕 on job)' : ' (☕ break)';
             const linked = !!(d.connections && d.connections[r.channelId]);
             const clash = !off && linked && driverClashLocal(d.id, r.pickupAt, endTs);
-            return `<option value="${d.id}" ${r.driverId === d.id ? 'selected' : ''} ${off || !linked || clash ? 'disabled' : ''}>${esc(d.name)}${off ? ' (off duty)' : onJ ? ' (🚗 on journey)' : !linked ? ` (not linked on ${esc(c.name)})` : clash ? ' (clashes ' + fmtHM(clash.start) + ')' : ''}</option>`;
+            return `<option value="${d.id}" ${r.driverId === d.id ? 'selected' : ''} ${off || !linked || clash ? 'disabled' : ''}>${esc(d.name)}${off ? offLbl : onJ ? ' (🚗 on journey)' : !linked ? ` (not linked on ${esc(c.name)})` : clash ? ' (clashes ' + fmtHM(clash.start) + ')' : ''}</option>`;
           }).join('')}
         </select>
         ${r.driverId ? `<span class="avatar" style="background:${drvColor(r.driverId)};width:22px;height:22px;font-size:9px">${drvInit(r.driverId)}</span>` : '<span class="pill warn">no free driver</span>'}
@@ -739,7 +759,7 @@ function renderRequests() {
       <h1 class="page-title">Requests</h1>
       <div class="page-desc">Every app in one inbox, auto-routed to the first free driver. You can re-assign before accepting.</div>
     </div>
-    <div class="chip">Auto-accept ${S.state.settings.autoAccept ? `on ≥ £${S.state.settings.minPerMile.toFixed(2)}/mi` : 'off'} · ${onlineDrivers().length}/${S.state.drivers.length} drivers online</div>
+    <div class="chip">Auto-accept ${S.state.settings.autoAccept ? `on ≥ £${S.state.settings.minPerMile.toFixed(2)}/mi` : 'off'} · ${S.state.drivers.filter((d) => ['online', 'on_journey'].includes(d.status)).length}/${S.state.drivers.length} drivers accepting</div>
   </div>
   ${pending.length ? `<div class="req-grid">${pending.map(card).join('')}</div>` : `
     <div class="card empty-state"><div class="big">🛰️</div>Listening on ${Object.values(S.state.channels).filter((c) => c.id !== 'direct' && c.status === 'connected').length} channels…<br>
@@ -794,11 +814,12 @@ function renderMap() {
   const homes = S.state.drivers.map((d) => {
     if (!d.home) return '';
     const [x, y] = proj(d.home.lat, d.home.lng);
-    const col = d.status === 'online' ? d.color : d.status === 'on_journey' ? '#FBBF24' : '#3D5478';
+    const st = drvStatus(d);
+    const col = st.mapColor || d.color;
     return `<g>
       <rect x="${x - 7}" y="${y - 14}" width="14" height="19" rx="4" fill="${col}" stroke="#0A0F1A" stroke-width="1.5"/>
       <text x="${x}" y="${y}" text-anchor="middle" font-size="8.5" font-weight="800" fill="#06101C">${esc(drvInit(d.id))}</text>
-      <title>${esc(d.name)} — based in ${esc(d.home.name)} (${d.status === 'on_journey' ? '🚗 on journey' : d.status})</title>
+      <title>${esc(d.name)} — based in ${esc(d.home.name)} (${st.icon} ${st.label})</title>
     </g>`;
   }).join('');
   const sideJob = (b) => `<div class="map-job" onclick="openBlockModal('${b.id}')">
@@ -816,7 +837,7 @@ function renderMap() {
   <div class="map-layout" style="margin-top:14px">
     <div>
       <div class="panel" style="margin-bottom:16px"><h3>Fleet status</h3>
-        ${S.state.drivers.map((d) => `<div class="mini-stat"><span><span class="cdot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${d.status === 'online' ? d.color : d.status === 'on_journey' ? '#FBBF24' : '#3D5478'};margin-right:7px"></span>${esc(d.name)}</span><b class="${d.status === 'online' ? '' : 'muted'}">${d.status === 'on_journey' ? '🚗 on journey' : d.status}</b></div>`).join('')}
+        ${S.state.drivers.map((d) => { const st = drvStatus(d); return `<div class="mini-stat"><span><span class="cdot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${st.mapColor || d.color};margin-right:7px"></span>${esc(d.name)}</span><b class="${d.status === 'online' ? '' : 'muted'}">${st.icon} ${st.label}</b></div>`; }).join('')}
       </div>
       <div class="panel"><h3>On the map (${upcoming.length})</h3>
         ${upcoming.length ? upcoming.sort((a, b) => new Date(a.start) - new Date(b.start)).slice(0, 9).map(sideJob).join('') : '<div class="muted" style="font-size:13px;padding:6px 0">No geocoded jobs upcoming. Direct bookings typed in free text may not appear here.</div>'}
@@ -1041,7 +1062,7 @@ function renderFleet() {
     const upNext = blocks().filter((b) => b.driverId === d.id && b.status === 'confirmed' && new Date(b.end) > new Date()).sort((a, b) => new Date(a.start) - new Date(b.start));
     const earned = doneToday.reduce((s, b) => s + (b.fare || 0), 0);
     const next = upNext[0];
-    return `<div class="dr-card ${d.status !== 'online' ? 'off' : ''}">
+    return `<div class="dr-card ${['offline', 'break'].includes(d.status) ? 'off' : ''}">
       <div class="dr-head">
         <span class="avatar lg" style="background:${d.color}">${esc(d.name.split(' ').map((w) => w[0]).slice(0, 2).join(''))}</span>
         <div style="flex:1">
@@ -1052,7 +1073,7 @@ function renderFleet() {
             return conn ? `<i style="background:${c2.color}" title="${esc(c2.name)}: ${esc(conn.ref)}"></i>` : '';
           }).join('') || '<span class="muted" style="font-size:10.5px">no apps linked — add driver numbers in Settings</span>'}</div>
         </div>
-        <span class="pill ${d.status === 'online' ? 'ok' : d.status === 'on_journey' ? 'warn' : 'mut'}">${d.status === 'online' ? 'online' : d.status === 'on_journey' ? '🚗 on journey' : 'off duty'}</span>
+        <span class="pill ${drvStatus(d).pill}">${drvStatus(d).icon} ${drvStatus(d).label}${d.status === 'break' && d.breakUntil ? ' · back ' + fmtHM(d.breakUntil) : ''}</span>
       </div>
       <div class="dr-stats">
         <div><div class="v">${doneToday.length}</div><div class="k">trips today</div></div>
@@ -1065,7 +1086,7 @@ function renderFleet() {
         <button class="btn sm" onclick="openDriverModal('${d.id}')">Edit profile</button>
         ${d.status === 'on_journey'
           ? `<button class="btn sm" disabled title="Finish the journey from the journey screen first">🚗 driving…</button>`
-          : `<button class="btn sm ${d.status === 'online' ? 'danger ghost' : 'primary'}" onclick="toggleDriver('${d.id}')">${d.status === 'online' ? 'Take off duty' : 'Bring online'}</button>`}
+          : `<select class="duty-sel" onchange="assignStatus('${d.id}', this.value)" title="Duty status">${['online', 'on_job', 'break', 'offline'].map((s) => `<option value="${s}" ${d.status === s ? 'selected' : ''}>${DRV_STATUS[s].icon} ${DRV_STATUS[s].label}</option>`).join('')}</select>`}
       </div>
     </div>`;
   };
@@ -1114,6 +1135,47 @@ async function submitDriver(e, id) {
   refresh(); return false;
 }
 async function toggleDriver(id) { try { await api(`/api/drivers/${id}/toggle`, 'POST'); } catch (e) { toast(e.message, 'err'); } refresh(); }
+async function setDriverStatus(id, status, breakMin) {
+  try {
+    await api(`/api/drivers/${id}/status`, 'POST', { status, breakMin });
+    const st = DRV_STATUS[status];
+    const msg = { online: '🟢 Accepting — job offers will route to you', on_job: '🚕 On a job — no new offers until you\'re back', break: `☕ On a break${breakMin ? ` — back in ${breakMin} min` : ''}`, offline: '⚫ Offline — see you next shift' }[status];
+    toast(msg || (st ? st.label : status), status === 'online' ? 'ok' : 'warn');
+  } catch (e) { toast(e.message, 'err'); }
+  refresh();
+}
+/* duty-status picker: Accepting / On job / Break / Offline (On journey is set by journey mode) */
+function openStatusPicker() {
+  const d = myDriver();
+  if (!d) return;
+  if (d.status === 'on_journey') return toast('🚗 You’re on a journey — complete it from the journey screen first', 'warn');
+  const opt = (s, desc) => {
+    const st = DRV_STATUS[s];
+    return `<button class="duty-opt ${d.status === s ? 'cur' : ''}" onclick="pickStatus('${s}')">
+      <span class="d-ico">${st.icon}</span>
+      <span class="d-txt"><b>${st.label}</b><span>${desc}</span></span>
+      ${d.status === s ? '<span class="d-tick">✓</span>' : ''}
+    </button>`;
+  };
+  const breakBtns = [15, 30, 45, 60].map((m) => `<button class="btn sm" onclick="pickBreak(${m})">${m} min</button>`).join('');
+  openModal(`
+    <h2>Your duty status</h2>
+    <div class="msub" style="margin-bottom:14px">Only <b>Accepting</b> receives routed job offers. Everything else pauses them.</div>
+    <div class="duty-list">
+      ${opt('online', 'Offers route to you as they land')}
+      ${opt('on_job', 'Working a job not tracked in FareFlow')}
+      ${opt('offline', 'Off duty — finished for the day')}
+    </div>
+    <div class="duty-break ${d.status === 'break' ? 'cur' : ''}">
+      <div class="duty-break-head"><span class="d-ico">☕</span><b>On a break</b>${d.status === 'break' ? '<span class="d-tick">✓</span>' : ''}</div>
+      <div class="duty-break-desc">Pick a length and you’re automatically back to Accepting when it ends${d.status === 'break' && d.breakUntil ? ` — currently back ~${fmtHM(d.breakUntil)}` : ''}.</div>
+      <div class="duty-break-btns">${breakBtns}<button class="btn sm" onclick="pickBreak(0)">Until I’m back</button></div>
+    </div>
+    <div class="m-actions"><button class="btn" onclick="closeModal()">Done</button></div>`);
+}
+function pickStatus(s) { closeModal(); const d = myDriver(); if (d) setDriverStatus(d.id, s); }
+function pickBreak(mins) { closeModal(); const d = myDriver(); if (d) setDriverStatus(d.id, 'break', mins || undefined); }
+function assignStatus(id, s) { setDriverStatus(id, s); }
 
 /* -------------------------------------------------------------- channels */
 function renderChannels() {
@@ -1320,7 +1382,7 @@ function renderSettings() {
         <div class="tab-note" style="margin-bottom:12px">Each company issues its drivers a unique number. Enter it here so ${selD ? esc(selD.name.split(' ')[0]) : 'the driver'} can receive that app's jobs — FareFlow only routes an app's offers to drivers linked on it.</div>
         <div class="form-row"><label>Driver</label>
           <select class="input" onchange="setConnDriver(this.value)">
-            ${S.state.drivers.map((d) => `<option value="${d.id}" ${S.connDriver === d.id ? 'selected' : ''}>${esc(d.name)}${d.status === 'on_journey' ? ' (🚗 on journey)' : d.status !== 'online' ? ' (off duty)' : ''}</option>`).join('')}
+            ${S.state.drivers.map((d) => `<option value="${d.id}" ${S.connDriver === d.id ? 'selected' : ''}>${esc(d.name)}${d.status !== 'online' ? ' (' + drvStatus(d).icon + ' ' + drvStatus(d).label + ')' : ''}</option>`).join('')}
           </select>
         </div>
         <div class="conn-summary">${Object.values(S.state.channels).filter((c2) => c2.id !== 'direct').map((c2) => {
@@ -1489,7 +1551,7 @@ function defaultDate(offsetDays = 0) { const d = new Date(); d.setDate(d.getDate
 function nextHour() { const d = new Date(nowMs() + 3600000); return `${String(d.getHours()).padStart(2, '0')}:00`; }
 function driverOptions(includeAll) {
   return `${includeAll ? '<option value="all">🌐 Whole fleet</option>' : ''}` +
-    S.state.drivers.map((d) => `<option value="${d.id}" ${d.status !== 'online' && d.status !== 'on_journey' && !includeAll ? '' : ''}>${esc(d.name)}${d.status === 'on_journey' ? ' (🚗 on journey)' : d.status !== 'online' ? ' (off duty)' : ''}</option>`).join('');
+    S.state.drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.status !== 'online' ? ' (' + drvStatus(d).icon + ' ' + drvStatus(d).label + ')' : ''}</option>`).join('');
 }
 function openDirectModal() {
   openModal(`

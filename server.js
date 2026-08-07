@@ -174,8 +174,8 @@ const driverById = (id) => state.drivers.find((d) => d.id === id);
 const onlineDrivers = () => state.drivers.filter((d) => d.status === 'online');
 /* drivers actively working (online or mid-journey) — on-journey drivers can stack later-slot jobs */
 const activeDrivers = () => state.drivers.filter((d) => d.status === 'online' || d.status === 'on_journey');
-/* release a driver from journey mode: back to accepting jobs */
-const endJourney = (d) => { d.status = 'online'; d.journeyBlockId = null; };
+/* release a driver from journey mode: back to whatever duty status they had before (usually Accepting) */
+const endJourney = (d) => { d.status = ['online', 'on_job', 'break', 'offline'].includes(d.prevDuty) ? d.prevDuty : 'online'; d.prevDuty = null; d.journeyBlockId = null; };
 const driverLinked = (d, channelId) => channelId === 'direct' || !!(d.connections && d.connections[channelId]);
 function publicState() {
   const clone = JSON.parse(JSON.stringify(state));
@@ -641,6 +641,12 @@ setInterval(() => {
       }
     }
   }
+  for (const d of state.drivers) {
+    if (d.status === 'break' && d.breakUntil && new Date(d.breakUntil) <= now()) {
+      d.status = 'online'; d.breakUntil = null; d.breakSince = null; changed = true;
+      log('ok', `☕ ${d.name.split(' ')[0]}'s break ended — ACCEPTING jobs again`);
+    }
+  }
   if (changed) { broadcast('state'); save(); }
 }, 2000);
 setInterval(() => { // occasional rider cancellations
@@ -1102,6 +1108,7 @@ const server = http.createServer(async (req, res) => {
           if (d.status === 'on_journey' && d.journeyBlockId && d.journeyBlockId !== b.id) return send(res, 409, { error: `${first} is already on a journey — complete it first` });
           b.status = 'on_journey';
           b.journey = { startedAt: iso(now()), leg: 'to_pickup', pickedUpAt: null, startedBy: me2 ? me2.id : null };
+          d.prevDuty = d.status === 'on_journey' ? d.prevDuty || 'online' : d.status;
           d.status = 'on_journey'; d.journeyBlockId = b.id;
           log('ok', `🚗 ${first} started the journey — heading to pickup (${placeName(b.pickup) || 'pickup'}). App locked for safety; new offers pop for 20s only.`);
         } else if (action === 'leg') {
@@ -1177,6 +1184,24 @@ const server = http.createServer(async (req, res) => {
         log('ok', `${d.name}'s profile updated`);
         broadcast('state'); save();
         return send(res, 200, { ok: true });
+      }
+      m = p.match(/^\/api\/drivers\/([\w-]+)\/status$/);
+      if (m) {
+        const d = driverById(m[1]);
+        if (!d) return send(res, 404, { error: 'not found' });
+        const me2 = sessionUser(req);
+        if (me2 && me2.driverId && me2.driverId !== d.id) return send(res, 403, { error: 'You can only change your own status' });
+        const s2 = String(body.status || '');
+        if (!['online', 'on_job', 'break', 'offline'].includes(s2)) return send(res, 400, { error: 'status must be: online | on_job | break | offline' });
+        if (d.status === 'on_journey') return send(res, 409, { error: `${d.name.split(' ')[0]} is on a journey — complete it from the journey screen first` });
+        d.status = s2;
+        d.breakSince = s2 === 'break' ? iso(now()) : null;
+        const mins = Math.max(0, parseInt(body.breakMin, 10) || 0);
+        d.breakUntil = (s2 === 'break' && mins > 0) ? iso(addMin(now(), mins)) : null;
+        const label = { online: 'ACCEPTING jobs', on_job: 'ON A JOB — no new offers', break: `on a BREAK${mins ? `, back ~${fmtTime(d.breakUntil)}` : ''} — no new offers`, offline: 'OFFLINE' }[s2];
+        log(s2 === 'online' ? 'ok' : 'warn', `${d.name.split(' ')[0]} → ${label}`);
+        broadcast('state'); save();
+        return send(res, 200, { ok: true, status: d.status, breakUntil: d.breakUntil || null });
       }
       m = p.match(/^\/api\/drivers\/([\w-]+)\/toggle$/);
       if (m) {
