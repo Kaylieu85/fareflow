@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FareFlow — One diary. Every app.</title>
+<meta name="description" content="Channel manager for UK ride-hailing & private hire drivers: one diary, every app, every driver.">
+<meta name="theme-color" content="#0A0F1A">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FareFlow">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">
+    <img class="brand-mark" src="/icons/icon-192.png" alt="F" width="36" height="36" style="border-radius:10px">
+    <div>
+      <div class="brand-name">FareFlow</div>
+      <div class="brand-sub">Channel manager for UK drivers</div>
+    </div>
+  </div>
+  <nav id="nav">
+    <a href="#/diary" data-route="diary">Diary</a>
+    <a href="#/requests" data-route="requests">Requests <span id="reqBadge" class="badge hidden">0</span></a>
+    <a href="#/map" data-route="map">Map</a>
+    <a href="#/demand" data-route="demand">Demand</a>
+    <a href="#/fleet" data-route="fleet">Fleet</a>
+    <a href="#/channels" data-route="channels">Channels</a>
+    <a href="#/messages" data-route="messages">Messages</a>
+    <a href="#/earnings" data-route="earnings">Earnings</a>
+    <a href="#/api" data-route="api">API</a>
+    <a href="#/settings" data-route="settings">Settings</a>
+  </nav>
+  <div class="top-right">
+    <div class="live-chip" id="liveChip" title="Live connection to FareFlow sync engine">
+      <span class="dot" id="connDot"></span><span id="connText">connecting…</span>
+    </div>
+    <div class="clock" id="clock">—</div>
+    <span id="userChip"></span>
+    <button class="master" id="masterBtn" onclick="toggleMaster()">Go offline</button>
+  </div>
+</header>
+
+<main id="view"><div class="loading">Loading your diary…</div></main>
+
+<footer id="foot">
+  Demo build — channel APIs (Uber, Bolt, FREE NOW, Gett, Veezu, Addison Lee), SMS gateway and rider behaviour are simulated locally.
+  Install to your home screen for the full app experience. · <a href="/get" style="color:var(--accent)">fareflow.link/get — marketing site ↗</a>
+</footer>
+
+<div id="modalRoot"></div>
+<div id="toasts"></div>
+<script src="/app.js"></script>
+</body>
+</html>

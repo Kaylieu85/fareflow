@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Track your driver — FareFlow</title>
+<meta name="theme-color" content="#0A0F1A">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<style>
+:root{--bg:#0A0F1A;--card:#111A2C;--card2:#162136;--line:#1E2A44;--line2:#2A3A5C;--text:#E7EEF9;--muted:#8DA2C0;--accent:#38BDF8;--lime:#A3E635;--ok:#34D399;--warn:#FBBF24;--err:#F87171}
+*{box-sizing:border-box;margin:0}
+body{background:radial-gradient(900px 500px at 50% -10%,rgba(56,189,248,.12),transparent 60%),var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px 16px calc(20px + env(safe-area-inset-bottom))}
+.wrap{width:100%;max-width:430px}
+.brand{display:flex;align-items:center;gap:10px;justify-content:center;margin-bottom:18px}
+.brand img{width:34px;height:34px;border-radius:9px}
+.brand span{font-weight:800;font-size:16px;letter-spacing:.3px}
+.brand small{color:var(--muted);font-weight:500}
+.phase{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;text-align:center;margin-bottom:14px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+.phase .p-label{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:1px;color:var(--muted)}
+.phase .eta{font-size:52px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums}
+.phase .eta small{font-size:20px;color:var(--muted);font-weight:700}
+.phase .p-sub{color:var(--muted);font-size:13px;margin-top:6px}
+.phase.enroute{border-color:rgba(56,189,248,.5)}
+.phase.arriving{border-color:rgba(163,230,53,.6);box-shadow:0 0 30px rgba(163,230,53,.12)}
+.phase.verified,.phase.completed{border-color:rgba(52,211,153,.5)}
+.phase.cancelled{border-color:rgba(248,113,113,.5)}
+.routebar{margin:22px 8px 6px;position:relative;height:54px}
+.routebar .track{position:absolute;left:0;right:0;top:24px;height:6px;border-radius:3px;background:var(--card2);border:1px solid var(--line2)}
+.routebar .fill{position:absolute;left:0;top:24px;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--accent),var(--lime));transition:width 1.8s linear}
+.routebar .car{position:absolute;top:4px;font-size:22px;transform:translateX(-50%);transition:left 1.8s linear}
+.routebar .pin{position:absolute;top:6px;right:-2px;font-size:18px}
+.routebar .lbl{display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted);margin-top:34px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px}
+.driver{display:flex;align-items:center;gap:12px}
+.avatar{width:48px;height:48px;border-radius:50%;display:grid;place-items:center;font-weight:800;color:#06101C;font-size:17px;flex-shrink:0}
+.driver .dn{font-weight:800;font-size:17px}
+.driver .dv{color:var(--muted);font-size:13px}
+.driver .reg{margin-left:auto;text-align:right}
+.driver .reg b{display:inline-block;background:linear-gradient(180deg,#FDE047,#FACC15);color:#111;border-radius:5px;padding:3px 9px;font-family:ui-monospace,monospace;font-size:13px;letter-spacing:1px}
+.k{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);font-weight:800;margin-bottom:8px}
+.place{display:flex;gap:10px;align-items:flex-start;font-size:14px;padding:5px 0}
+.place .pin-ic{width:10px;height:10px;border-radius:50%;margin-top:5px;flex-shrink:0}
+.a{background:var(--ok)}.b{background:#F472B6}
+.code-row{display:flex;gap:10px;justify-content:center;margin:12px 0 4px}
+.code-row span{width:52px;height:64px;display:grid;place-items:center;font-size:32px;font-weight:800;background:var(--card2);border:1px solid var(--line2);border-radius:14px;box-shadow:inset 0 -4px 0 rgba(163,230,53,.3);font-variant-numeric:tabular-nums}
+.code-note{text-align:center;color:var(--muted);font-size:12px;line-height:1.6}
+.verified-big{display:flex;gap:10px;align-items:center;justify-content:center;color:#6EE7B7;font-weight:800;font-size:16px;margin-top:8px}
+.meta{color:var(--muted);font-size:12px;text-align:center;margin-top:16px;line-height:1.7}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);animation:blink 1.6s infinite;margin-right:5px}
+@keyframes blink{50%{opacity:.35}}
+.err-box{text-align:center;padding:60px 20px}
+.err-box .big{font-size:44px;margin-bottom:14px}
+@media(min-width:760px){.wrap{max-width:520px}}
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="brand"><img src="/icons/icon-192.png" alt="FareFlow"><div><span>FareFlow</span> <small>· live driver tracking</small></div></div>
+  <div class="card err-box"><div class="big">🛰️</div>Locating your driver…</div>
+</div>
+<script>
+const token = location.pathname.split('/t/')[1] || '';
+const $ = (s, e=document) => e.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtHM = (ts) => new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false});
+const brand = `<div class="brand"><img src="/icons/icon-192.png" alt="FareFlow"><div><span>FareFlow</span> <small>· live driver tracking</small></div></div>`;
+let lastFrac = 0;
+async function poll() {
+  let t;
+  try { const r = await fetch('/api/track/' + token); t = await r.json(); }
+  catch (e) { $('#app').innerHTML = brand + `<div class="card err-box"><div class="big">📡</div>Connection dropped — retrying…</div>`; return; }
+  if (!t.found) { $('#app').innerHTML = brand + `<div class="card err-box"><div class="big">🔍</div><b>Link not found</b><p style="color:var(--muted);margin-top:8px;font-size:13px">This tracking link is invalid or the booking was removed. Check the SMS/WhatsApp message again.</p></div>`; return; }
+  const initials = t.driver.name.split(' ').map(w=>w[0]).slice(0,2).join('');
+  let phaseHtml = '', routeHtml = '';
+  if (t.phase === 'cancelled') {
+    phaseHtml = `<div class="phase cancelled"><div class="p-label">Booking cancelled</div><div class="eta" style="font-size:30px">We're sorry</div><div class="p-sub">This booking was cancelled. Please contact your operator to rebook.</div></div>`;
+  } else if (t.phase === 'verified' || t.phase === 'completed') {
+    phaseHtml = `<div class="phase ${t.phase}"><div class="p-label">✓ Identity verified</div><div class="eta" style="font-size:30px">Enjoy your trip!</div><div class="p-sub">Code matched — you're with the right driver.</div></div>`;
+  } else {
+    const label = t.phase === 'arriving' ? 'Arriving now' : t.phase === 'enroute' ? 'Driver on the way' : 'Confirmed';
+    const eta = t.phase === 'arriving' ? '~1 min' : t.etaMin <= 1 ? '~1 min' : t.etaMin + ' <small>min</small>';
+    phaseHtml = `<div class="phase ${t.phase}"><div class="p-label">${label}</div><div class="eta">${eta}</div>
+      <div class="p-sub">Pickup ${fmtHM(t.pickupAt)} · ${esc(t.pickup.n)}</div></div>`;
+    if (t.frac != null) {
+      const pct = Math.round(t.frac * 100);
+      routeHtml = `<div class="routebar"><div class="track"></div><div class="fill" style="width:${pct}%"></div>
+        <div class="car" style="left:${pct}%">🚕</div><div class="pin">📍</div>
+        <div class="lbl"><span>Driver</span><span>${esc(t.pickup.n)}</span></div></div>`;
+    }
+  }
+  const codeCard = t.code && t.phase !== 'verified' && t.phase !== 'completed' && t.phase !== 'cancelled' ? `
+    <div class="card"><div class="k">Your secret pickup code</div>
+      <div class="code-row">${t.code.split('').map(n=>`<span>${n}</span>`).join('')}</div>
+      <div class="code-note">Show this to <b>${esc(t.driver.name.split(' ')[0])}</b> when they arrive — it confirms you're each other's booking, both ways. Never share it before pickup.</div>
+    </div>` : (t.phase === 'verified' || t.phase === 'completed') ? `<div class="card"><div class="verified-big">✓ Code verified — driver & rider matched</div></div>` : '';
+  const driverCard = t.phase !== 'cancelled' ? `
+    <div class="card driver">
+      <div class="avatar" style="background:${t.driver.color}">${esc(initials)}</div>
+      <div><div class="dn">${esc(t.driver.name)}</div><div class="dv">${esc(t.driver.vehicle)}</div></div>
+      <div class="reg"><b>${esc(t.driver.reg)}</b></div>
+    </div>` : '';
+  $('#app').innerHTML = brand + phaseHtml + routeHtml + driverCard + codeCard + `
+    <div class="meta"><span class="dot"></span>Updates live every few seconds · no app needed<br>
+    Booked via ${esc(t.via)}${t.fare ? ' · Quote ' + '£' + t.fare.toFixed(2) : ''} · Powered by FareFlow</div>`;
+  lastFrac = t.frac ?? lastFrac;
+}
+poll();
+setInterval(poll, 4000);
+</script>
+</body>
+</html>

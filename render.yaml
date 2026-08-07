@@ -1,0 +1,14 @@
+# One-click deploy blueprint for Render (https://render.com → New → Blueprint)
+services:
+  - type: web
+    name: fareflow
+    runtime: node
+    plan: free
+    buildCommand: echo "zero dependencies — nothing to build"
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+    # Note: Render's free plan has no persistent disk — state reseeds to demo
+    # data on redeploy/restart. Add a Disk + DATA_FILE=/var/data/data.json on paid.

@@ -1,0 +1,7 @@
+# State & local tooling — a fresh deploy seeds its own demo data
+data.json
+cloudflared
+tools/
+node_modules/
+.git/
+*.log

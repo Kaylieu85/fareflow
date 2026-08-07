@@ -1,0 +1,13 @@
+{
+  "name": "fareflow",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FareFlow — the channel manager for UK ride-hailing & private-hire drivers (zero-dependency PWA)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "qr": "python3 tools/gen_qr.py"
+  },
+  "engines": { "node": ">=18" },
+  "license": "UNLICENSED"
+}
