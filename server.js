@@ -213,6 +213,21 @@ function broadcast(event, data) {
 }
 setInterval(() => { for (const res of clients) { try { res.write(': hb\n\n'); } catch {} } }, 25000);
 
+/* -------------------------------------------- real-time booking popups */
+const placeName = (p) => p == null ? '' : (typeof p === 'string' ? p : (p.n || p.name || ''));
+function notifyBooking(block, via) {
+  const ch = state.channels[block.channelId] || CHANNEL_CATALOG[block.channelId] || { name: block.channelId, color: '#38BDF8' };
+  const drv = driverById(block.driverId);
+  broadcast('booking', {
+    id: block.id, via: via || 'accepted',
+    rider: block.rider, fare: block.fare, code: block.code,
+    channelId: block.channelId, channel: ch.name, color: ch.color,
+    driverId: block.driverId, driver: drv ? drv.name.split(' ')[0] : 'Driver',
+    pickup: placeName(block.pickup), dropoff: placeName(block.dropoff),
+    start: block.start, durationMin: block.durationMin, distanceMi: block.distanceMi,
+  });
+}
+
 /* ------------------------------------------------------------------ logs */
 function log(level, msg) {
   const entry = { t: iso(now()), level, msg };
@@ -495,6 +510,7 @@ function acceptRequest(req, auto = false) {
   log('ok', `${auto ? 'Auto-accepted' : 'Accepted'} ${state.channels[req.channelId].name} job for ${drv ? drv.name.split(' ')[0] : '?'} — ${req.rider}, £${req.fare.toFixed(2)} ${fmtDate(start)} ${fmtTime(start)}`);
   syncBlockToChannels(block);
   broadcast('state'); save();
+  notifyBooking(block, auto ? 'auto' : 'accepted');
   return block;
 }
 
@@ -969,6 +985,7 @@ const server = http.createServer(async (req, res) => {
         syncBlockToChannels(block);
         if (phone) sendMessage({ blockId: id, to: phone, body: msgTemplates.confirmation(block, d), type: block.msgType, kind: 'confirmation' });
         broadcast('state'); save();
+        notifyBooking(block, 'direct');
         return send(res, 200, { ok: true, id });
       }
       if (p === '/api/blocks') {

@@ -89,6 +89,7 @@ function setupSSE() {
     es.onopen = () => setConn(true);
     es.onerror = () => setConn(false);
     es.addEventListener('state', () => refresh());
+    es.addEventListener('booking', (e) => { try { popBooking(JSON.parse(e.data)); } catch {} });
     es.addEventListener('log', (e) => {
       const entry = JSON.parse(e.data);
       if (['ok', 'warn', 'err'].includes(entry.level)) toast(entry.msg, entry.level);
@@ -104,6 +105,78 @@ function toast(msg, level = 'ok') {
   t.textContent = msg;
   $('#toasts').appendChild(t);
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .4s'; setTimeout(() => t.remove(), 400); }, 4200);
+}
+
+/* ------------------------------------------------ real-time booking popups */
+function chime() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ac = chime.ac || (chime.ac = new AC());
+    if (ac.state === 'suspended') ac.resume();
+    const t0 = ac.currentTime;
+    [[880, 0], [1174.6, 0.12], [1568, 0.24]].forEach(([f, dt]) => {
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0, t0 + dt);
+      g.gain.linearRampToValueAtTime(0.16, t0 + dt + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + dt + 0.5);
+      o.connect(g).connect(ac.destination);
+      o.start(t0 + dt); o.stop(t0 + dt + 0.55);
+    });
+  } catch {}
+}
+function notifySystem(b) {
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'granted' || !document.hidden) return;
+    const n = new Notification(`🚕 New ${b.channel} booking — £${(+b.fare || 0).toFixed(2)}`, {
+      body: `${b.rider}\n${b.pickup} → ${b.dropoff}\n${b.driver} · pickup ${fmtHM(b.start)}`,
+      icon: '/icons/icon-192.png', tag: 'booking-' + b.id,
+    });
+    n.onclick = () => { try { window.focus(); } catch {} jumpToBooking(b.id, b.start); };
+  } catch {}
+}
+function requestNotify() {
+  if (!('Notification' in window)) return toast('This browser has no notification support', 'warn');
+  if (Notification.permission === 'granted') return toast('🔔 Booking alerts are on for this device', 'ok');
+  if (Notification.permission === 'denied') return toast('Notifications are blocked — allow them in browser site settings', 'err');
+  Notification.requestPermission().then((p) => {
+    toast(p === 'granted' ? '🔔 Booking alerts will pop on this device' : 'Notifications not enabled', p === 'granted' ? 'ok' : 'warn');
+  });
+}
+function jumpToBooking(id, start) {
+  const day = new Date(start), today = new Date();
+  day.setHours(0, 0, 0, 0); today.setHours(0, 0, 0, 0);
+  S.weekOffset = Math.round((day - today) / (7 * 86400000));
+  if (location.hash !== '#/diary') location.hash = '#/diary'; else setRoute();
+  render();
+  openBlockModal(id);
+}
+function popBooking(b) {
+  if (!S.state || !b || !b.id) return;
+  chime();
+  if (navigator.vibrate) try { navigator.vibrate([90, 40, 90]); } catch {}
+  notifySystem(b);
+  toast(`🚕 New ${b.channel} booking — ${b.rider}, £${(+b.fare || 0).toFixed(2)}`, 'ok');
+  const root = document.getElementById('bookPops');
+  if (!root) return;
+  const el = document.createElement('div');
+  el.className = 'book-pop';
+  el.style.setProperty('--bp', b.color || '#38BDF8');
+  el.innerHTML = `
+    <div class="bp-head"><span class="bp-pill">${esc(b.channel)}</span><span class="bp-via">${b.via === 'auto' ? '⚡ auto-accepted' : b.via === 'direct' ? '📞 direct booking' : '✓ just accepted'}</span><button class="bp-x" aria-label="Dismiss">✕</button></div>
+    <div class="bp-main">
+      <div class="bp-fare">£${(+b.fare || 0).toFixed(2)}</div>
+      <div class="bp-who"><b>${esc(b.rider)}</b> → driver ${esc(b.driver)}</div>
+      <div class="bp-route">${esc(b.pickup)} → ${esc(b.dropoff)}</div>
+      <div class="bp-when">${fmtDay(b.start)} · pickup ${fmtHM(b.start)}${b.distanceMi ? ` · ${b.distanceMi} mi` : ''}${b.code ? ` · pickup code <b>${esc(String(b.code))}</b>` : ''}</div>
+    </div>
+    <div class="bp-actions"><button class="bp-view">Open in diary →</button></div>
+    <div class="bp-bar"><i></i></div>`;
+  const kill = () => { el.classList.add('out'); setTimeout(() => el.remove(), 380); };
+  el.querySelector('.bp-x').onclick = kill;
+  el.querySelector('.bp-view').onclick = () => { kill(); jumpToBooking(b.id, b.start); };
+  root.appendChild(el);
+  setTimeout(() => { if (el.isConnected) kill(); }, 14000);
 }
 
 /* ----------------------------------------------------------------- modal */

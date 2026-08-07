@@ -44,6 +44,7 @@
     </div>
     <div class="clock" id="clock">—</div>
     <span id="userChip"></span>
+    <button class="master" id="bellBtn" onclick="requestNotify()" title="Get booking alerts on this device" aria-label="Enable booking alerts">🔔</button>
     <button class="master" id="masterBtn" onclick="toggleMaster()">Go offline</button>
   </div>
 </header>
@@ -57,6 +58,7 @@
 
 <div id="modalRoot"></div>
 <div id="toasts"></div>
+<div id="bookPops"></div>
 <script src="/app.js"></script>
 </body>
 </html>
