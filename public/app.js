@@ -43,10 +43,17 @@ function driverClashLocal(driverId, startTs, endTs) {
 
 /* ------------------------------------------------------------------- api */
 async function api(path, method = 'GET', body) {
-  const res = await fetch(path, {
-    method, headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 20000); // never hang forever — free hosts nap between visits
+  let res;
+  try {
+    res = await fetch(path, {
+      method, signal: ctl.signal, headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
     const err = new Error(e.error || res.statusText);
@@ -1365,13 +1372,25 @@ async function logout() {
 window.addEventListener('hashchange', setRoute);
 (async function init() {
   setRoute();
-  try {
-    const { state, serverTime, me } = await api('/api/state');
-    S.state = state;
-    S.me = me;
-    S.serverTimeOffset = new Date(serverTime) - Date.now();
-    startAuthed();
-  } catch (e) {
-    if (!(e && e.auth)) { toast('Could not reach FareFlow server', 'err'); showLogin(); }
+  let tries = 0;
+  for (;;) {
+    try {
+      const { state, serverTime, me } = await api('/api/state');
+      S.state = state;
+      S.me = me;
+      S.serverTimeOffset = new Date(serverTime) - Date.now();
+      startAuthed();
+      return;
+    } catch (e) {
+      // signed out → show the login form (this was the stuck-on-"Loading your diary…" bug)
+      if (e && e.auth) { showLogin(); return; }
+      // server napping / network wobble → keep retrying with visible progress
+      tries++;
+      const v = document.getElementById('view');
+      if (v && !S.state) {
+        v.innerHTML = `<div class="loading">🚕 Waking FareFlow up…<br><span class="muted" style="font-size:13px;display:inline-block;margin-top:8px">Free hosting naps when quiet — the first load can take up to a minute.<br>Retrying automatically (${tries})…</span></div>`;
+      }
+      await new Promise((r) => setTimeout(r, 4000));
+    }
   }
 })();
