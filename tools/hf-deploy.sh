@@ -7,7 +7,7 @@ REPO="spaces/$HF_USER/$HF_SPACE"
 echo "== creating $REPO (safe if it already exists) =="
 curl -s -X POST "https://huggingface.co/api/repos/create" \
   -H "Authorization: Bearer $HF_TOKEN" -H "Content-Type: application/json" \
-  -d "{\"type\":\"space\",\"name\":\"$HF_SPACE\",\"sdk\":\"docker\",\"private\":false}" | head -c 240; echo
+  -d "{\"type\":\"space\",\"name\":\"$HF_SPACE\",\"sdk\":\"'${HF_SDK:-docker}'\",\"private\":false}" | head -c 240; echo
 [ -d .git ] || git init -q
 git config user.email "fareflow@deploy.local"
 git config user.name "FareFlow Deploy"
