@@ -134,6 +134,7 @@ function freshState() {
     users: defaultUsers(), sessions: {},
     channels, requests: {}, requestOrder: [], blocks: {}, messages: [], logs: [], webhookLog: [],
     supportTickets: [],
+    compliance: { consentAt: null, version: 0, by: null, log: [] },
   };
 }
 let state = null;
