@@ -1,9 +1,10 @@
 /* FareFlow service worker — cache the app shell for install/offline; API stays network-only */
-const CACHE = 'fareflow-v11';
+const CACHE = 'fareflow-v12';
 const SHELL = [
   '/', '/index.html', '/styles.css', '/app.js', '/track.html',
   '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png',
-  '/icons/apple-touch-icon.png', '/icons/favicon-32.png',
+  '/icons/apple-touch-icon.png', '/icons/apple-touch-icon-152.png',
+  '/icons/apple-touch-icon-167.png', '/icons/favicon-32.png',
 ];
 
 self.addEventListener('install', (e) => {
