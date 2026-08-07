@@ -1,7 +1,7 @@
-# State & local tooling — a fresh deploy seeds its own demo data
+# Keep the image lean; state & local-only tooling stays out
 data.json
 cloudflared
-tools/
 node_modules/
 .git/
 *.log
+tmp/
