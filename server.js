@@ -19,6 +19,10 @@ const ROOT = __dirname;
 const PUB = path.join(ROOT, 'public');
 // Hosts with persistent disks (Render/VPS/HF Spaces) can point this at a mount; defaults to local file.
 const DATA_FILE = process.env.DATA_FILE || path.join(ROOT, 'data.json');
+/* onboarding documents (PCO licence images, driver photos) live NEXT TO the data file —
+   on Render/Docker that's the persistent /data volume, locally it's ./uploads (git-ignored) */
+const UPLOAD_DIR = path.join(path.dirname(DATA_FILE), 'uploads');
+try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
 
 /* ------------------------------------------------------------------ helpers */
 const uid = (p = 'id') => `${p}_${crypto.randomBytes(5).toString('hex')}`;
@@ -147,6 +151,7 @@ function freshState() {
     channels, requests: {}, requestOrder: [], blocks: {}, messages: [], logs: [], webhookLog: [],
     supportTickets: [],
     compliance: { consentAt: null, version: 0, by: null, log: [] },
+    outbox: [], // simulated email gateway (verification codes) — swap for SMTP (Resend/SendGrid) in production
   };
 }
 let state = null;
@@ -160,6 +165,12 @@ function load() {
     if (!state.messages) state.messages = [];
     if (!state.cities) state.cities = CITIES;
     if (!state.settings.feedToken) state.settings.feedToken = crypto.randomBytes(8).toString('hex');
+    if (!Array.isArray(state.outbox)) state.outbox = [];
+    for (const u2 of state.users) {
+      if (u2.emailVerifiedAt === undefined) u2.emailVerifiedAt = u2.createdAt || iso(now()); // legacy pilot accounts grandfathered
+      if (!u2.onboarding) u2.onboarding = { status: 'exempt' };                                  // seeded accounts skip the KYC flow
+      if (u2.plan === undefined) u2.plan = null;
+    }
     if (!state.webhookLog) state.webhookLog = [];
     for (const c of Object.values(state.channels)) if (!c.apiKey) c.apiKey = crypto.randomBytes(12).toString('hex');
     for (const b of Object.values(state.blocks)) if (b.kind === 'booking' && !b.trackingToken) b.trackingToken = uid('trk');
@@ -222,6 +233,47 @@ function startSession(res, user) {
   state.sessions[tok] = { userId: user.id, createdAt: iso(now()) };
   res.setHeader('Set-Cookie', `ff_session=${tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`);
 }
+
+/* -------------------------------------------------- verification / onboarding / plans */
+const isAdminU = (u2) => !!u2 && !u2.driverId;
+function mePayload(u2) {
+  return {
+    id: u2.id, name: u2.name, email: u2.email, phone: u2.phone, driverId: u2.driverId, legal: u2.legal || null,
+    emailVerifiedAt: u2.emailVerifiedAt || null,
+    onboarding: u2.onboarding ? { status: u2.onboarding.status, reviewNote: u2.onboarding.reviewNote || null, pcoNumber: u2.onboarding.pcoNumber || null } : { status: 'new' },
+    plan: u2.plan || null,
+  };
+}
+/* subscription catalogue — billing itself is PARKED (see BILLING-LAYER.md); plans record intent, free during pilot */
+const PLANS = {
+  founding: { id: 'founding', name: 'Founding Driver', pricePence: 400, label: '£4/mo locked for life', blurb: 'Pilot-only — first 50 drivers. Price never rises, in return for a review.' },
+  solo:     { id: 'solo',     name: 'Solo',            pricePence: 600, label: '£6/mo', blurb: 'Unified diary, journey mode, duty statuses, unlimited channels.' },
+  pro:      { id: 'pro',      name: 'Pro',             pricePence: 900, label: '£9/mo', blurb: 'Everything in Solo + auto-accept, demand heatmaps, earnings & tax exports.' },
+};
+function issueVerification(u2) {
+  const code = String(randi(100000, 999999));
+  u2.verifCode = { code, exp: Date.now() + 10 * 60 * 1000, tries: 0 };
+  state.outbox.unshift({ id: uid('mail'), to: u2.email, kind: 'verify', subject: 'Verify your FareFlow email', body: `Your FareFlow verification code is ${code}. It expires in 10 minutes.`, t: iso(now()) });
+  if (state.outbox.length > 200) state.outbox.length = 200;
+  log('info', `Verification email queued for ${u2.email} (demo inbox, code ${code})`);
+  return code; // demo build returns the code to the UI; production sends via SMTP and returns nothing
+}
+const UP_MIME = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
+function saveUpload(u2, kind, dataUrl) {
+  const mm = String(dataUrl || '').match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\r\n]+)$/);
+  if (!mm) return { err: 'Only JPEG, PNG or WEBP images are accepted' };
+  const bin = Buffer.from(mm[2].replace(/\s/g, ''), 'base64');
+  if (!bin.length) return { err: 'The image file appears empty' };
+  if (bin.length > 4 * 1024 * 1024) return { err: 'Image too large — keep it under 4 MB' };
+  const fname = `${u2.id}-${kind}-${Date.now()}${UP_MIME[mm[1]]}`;
+  try {
+    fs.writeFileSync(path.join(UPLOAD_DIR, fname), bin);
+    const old = u2.onboarding && u2.onboarding[kind === 'licence' ? 'licenceImg' : 'photoImg'];
+    if (old && old !== fname) { try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(old))); } catch {} }
+  } catch (e) { return { err: 'Could not store the image — try again' }; }
+  return { file: fname };
+}
+const verifyGate = (u2) => (!u2 ? 'auth' : !u2.emailVerifiedAt ? 'email_not_verified' : null);
 let saveTimer = null;
 function save() {
   clearTimeout(saveTimer);
@@ -812,12 +864,12 @@ function send(res, code, obj, headers = {}) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 2e5) req.destroy(); });
+    req.on('data', (c) => { data += c; if (data.length > 6.5e6) req.destroy(); }); // generous: onboarding photo uploads ride this parser as base64
     req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
     req.on('error', reject);
   });
 }
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.jpg': 'image/jpeg', '.ics': 'text/calendar; charset=utf-8' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.webmanifest': 'application/manifest+json', '.ics': 'text/calendar; charset=utf-8' };
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
@@ -835,7 +887,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/state' && req.method === 'GET') {
       if (gate()) return;
-      return send(res, 200, { state: publicState(), serverTime: iso(now()), me: { id: user.id, name: user.name, email: user.email, phone: user.phone, driverId: user.driverId, legal: user.legal || null } });
+      return send(res, 200, { state: publicState(), serverTime: iso(now()), me: mePayload(user) });
     }
     if (p === '/api/health') return send(res, 200, { ok: true });
     /* legal documents — public, no session needed */
@@ -845,6 +897,31 @@ const server = http.createServer(async (req, res) => {
     if ((p === '/terms' || p === '/privacy') && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(LEGAL.legalPage(p === '/terms' ? 'terms' : 'privacy'));
+    }
+    if (p === '/api/admin/onboardings' && req.method === 'GET') {
+      if (!isAdminU(user)) return send(res, 403, { error: 'Fleet admin only' });
+      const rows = state.users
+        .filter((u2) => u2.onboarding && ['pending_review', 'approved', 'rejected'].includes(u2.onboarding.status))
+        .map((u2) => ({
+          userId: u2.id, email: u2.email, phone: u2.phone, status: u2.onboarding.status,
+          fullName: u2.onboarding.fullName || u2.name, dob: u2.onboarding.dob || null,
+          pcoNumber: u2.onboarding.pcoNumber || null, address: u2.onboarding.address || null,
+          licenceImg: u2.onboarding.licenceImg || null, photoImg: u2.onboarding.photoImg || null,
+          submittedAt: u2.onboarding.submittedAt || null, reviewNote: u2.onboarding.reviewNote || null,
+          plan: u2.plan ? u2.plan.name : null,
+        }));
+      return send(res, 200, { rows });
+    }
+    if (p.startsWith('/uploads/') && req.method === 'GET') {
+      if (!user) return send(res, 401, { error: 'auth' });
+      const fname = path.basename(p.slice('/uploads/'.length));
+      if (!isAdminU(user) && !fname.startsWith(user.id + '-')) return send(res, 403, { error: 'not your document' });
+      fs.readFile(path.join(UPLOAD_DIR, fname), (err, data) => {
+        if (err) { res.writeHead(404); res.end('Not found'); return; }
+        res.writeHead(200, { 'Content-Type': MIME[path.extname(fname)] || 'application/octet-stream', 'Cache-Control': 'private, no-store' });
+        res.end(data);
+      });
+      return;
     }
     if (p === '/api/demand' && req.method === 'GET') { if (gate()) return; return send(res, 200, buildDemand()); }
 
@@ -915,7 +992,7 @@ const server = http.createServer(async (req, res) => {
         startSession(res, u);
         log('info', `${u.name} signed in`);
         save();
-        return send(res, 200, { ok: true, me: { id: u.id, name: u.name, email: u.email, phone: u.phone, driverId: u.driverId, legal: u.legal || null } });
+        return send(res, 200, { ok: true, me: mePayload(u) });
       }
       if (p === '/api/support/tickets') {
         const subject = String(body.subject || '').trim().slice(0, 120);
@@ -947,11 +1024,119 @@ const server = http.createServer(async (req, res) => {
         });
         const u = mkUser(uid('usr'), name, email, phone, pw, drvId);
         u.legal = { tos: LEGAL.TOS_VERSION, tosAt: iso(now()), privacy: LEGAL.PRIVACY_VERSION, privacyAt: iso(now()) };
+        u.emailVerifiedAt = null;
+        u.onboarding = { status: 'new' };
+        u.plan = null;
         state.users.push(u);
         startSession(res, u);
-        log('ok', `${name} created an account and joined the fleet — accepted Terms v${LEGAL.TOS_VERSION} & Privacy v${LEGAL.PRIVACY_VERSION}; link their app driver numbers in Settings`);
+        const demoCode = issueVerification(u);
+        log('ok', `${name} created an account and joined the fleet — accepted Terms v${LEGAL.TOS_VERSION} & Privacy v${LEGAL.PRIVACY_VERSION}; email verification sent, onboarding next`);
         broadcast('state'); save();
-        return send(res, 200, { ok: true, me: { id: u.id, name: u.name, email: u.email, phone: u.phone, driverId: u.driverId, legal: u.legal } });
+        return send(res, 200, { ok: true, demoCode, me: mePayload(u) });
+      }
+      /* ---- email verification (simulated gateway — demo inbox returns the code to the UI) ---- */
+      if (p === '/api/auth/send-verification') {
+        const me2 = sessionUser(req);
+        if (!me2) return send(res, 401, { error: 'auth' });
+        if (me2.emailVerifiedAt) return send(res, 200, { ok: true, already: true, me: mePayload(me2) });
+        const demoCode = issueVerification(me2);
+        save();
+        return send(res, 200, { ok: true, demoCode });
+      }
+      if (p === '/api/auth/verify-email') {
+        const me2 = sessionUser(req);
+        if (!me2) return send(res, 401, { error: 'auth' });
+        if (me2.emailVerifiedAt) return send(res, 200, { ok: true, me: mePayload(me2) });
+        const v = me2.verifCode;
+        if (!v || Date.now() > v.exp) return send(res, 400, { error: 'That code has expired — request a new one' });
+        v.tries = (v.tries || 0) + 1;
+        if (v.tries > 5) { me2.verifCode = null; save(); return send(res, 429, { error: 'Too many attempts — request a new code' }); }
+        if (String(body.code || '').replace(/\D/g, '') !== v.code) { save(); return send(res, 400, { error: 'That code doesn’t match — check the email and try again' }); }
+        me2.emailVerifiedAt = iso(now());
+        me2.verifCode = null;
+        log('ok', `${me2.name} verified their email — onboarding unlocked`);
+        save();
+        return send(res, 200, { ok: true, me: mePayload(me2) });
+      }
+      /* ---- onboarding (KYC): details, licence/photo upload, submit — all gated on email verification ---- */
+      if (p === '/api/onboarding/details') {
+        const me2 = sessionUser(req); const g = verifyGate(me2);
+        if (g) return send(res, g === 'auth' ? 401 : 403, { error: g, message: 'Verify your email before completing onboarding' });
+        const fullName = String(body.fullName || '').trim();
+        const dob = new Date(String(body.dob || ''));
+        const addr = { line1: String(body.line1 || '').trim().slice(0, 90), line2: String(body.line2 || '').trim().slice(0, 90), city: String(body.city || '').trim().slice(0, 50), postcode: String(body.postcode || '').trim().toUpperCase().slice(0, 9) };
+        const pcoNumber = String(body.pcoNumber || '').trim().toUpperCase().slice(0, 24);
+        if (fullName.length < 3) return send(res, 400, { error: 'Enter your full legal name exactly as on your licence' });
+        if (isNaN(dob)) return send(res, 400, { error: 'Enter your date of birth' });
+        const age = (Date.now() - dob.getTime()) / (365.25 * 86400000);
+        if (age < 18 || age > 100) return send(res, 400, { error: 'You must be at least 18 to drive private hire' });
+        if (!addr.line1 || !addr.city) return send(res, 400, { error: 'Address line 1 and town/city are required' });
+        if (!/^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/.test(addr.postcode)) return send(res, 400, { error: 'Enter a valid UK postcode' });
+        if (pcoNumber.length < 4) return send(res, 400, { error: 'Enter your PCO / private-hire licence number' });
+        const o = me2.onboarding && me2.onboarding.status !== 'exempt' ? me2.onboarding : { status: 'new' };
+        Object.assign(o, { fullName, dob: dob.toISOString().slice(0, 10), address: addr, pcoNumber });
+        me2.onboarding = o;
+        save();
+        return send(res, 200, { ok: true });
+      }
+      if (p === '/api/onboarding/photo') {
+        const me2 = sessionUser(req); const g = verifyGate(me2);
+        if (g) return send(res, g === 'auth' ? 401 : 403, { error: g, message: 'Verify your email before completing onboarding' });
+        const kind = body.kind === 'licence' ? 'licence' : body.kind === 'photo' ? 'photo' : null;
+        if (!kind) return send(res, 400, { error: 'Unknown photo type' });
+        if (!me2.onboarding || me2.onboarding.status === 'exempt') me2.onboarding = { status: 'new' };
+        const r = saveUpload(me2, kind, body.dataUrl);
+        if (r.err) return send(res, 400, { error: r.err });
+        me2.onboarding[kind === 'licence' ? 'licenceImg' : 'photoImg'] = r.file;
+        log('info', `${me2.name} uploaded ${kind === 'licence' ? 'their PCO licence image' : 'a driver photo'}`);
+        save();
+        return send(res, 200, { ok: true, file: r.file });
+      }
+      if (p === '/api/onboarding/submit') {
+        const me2 = sessionUser(req); const g = verifyGate(me2);
+        if (g) return send(res, g === 'auth' ? 401 : 403, { error: g, message: 'Verify your email before completing onboarding' });
+        const o = me2.onboarding || {};
+        const missing = [];
+        if (!o.fullName) missing.push('full legal name');
+        if (!o.dob) missing.push('date of birth');
+        if (!o.address || !o.address.line1 || !o.address.postcode) missing.push('home address');
+        if (!o.pcoNumber) missing.push('PCO licence number');
+        if (!o.licenceImg) missing.push('photo of your PCO licence');
+        if (!o.photoImg) missing.push('driver photo');
+        if (missing.length) return send(res, 400, { error: 'Still needed: ' + missing.join(', ') });
+        o.status = 'pending_review'; o.submittedAt = iso(now()); o.reviewNote = null; o.reviewedAt = null; o.reviewedBy = null;
+        me2.onboarding = o;
+        log('ok', `Onboarding submitted by ${me2.name} (PCO ${o.pcoNumber}) — awaiting fleet review`);
+        broadcast('state'); save();
+        return send(res, 200, { ok: true, me: mePayload(me2) });
+      }
+      /* ---- plan selection (billing parked until trigger — see BILLING-LAYER.md; free during pilot) ---- */
+      if (p === '/api/billing/plan') {
+        const me2 = sessionUser(req);
+        if (!me2) return send(res, 401, { error: 'auth' });
+        const st = me2.onboarding && me2.onboarding.status;
+        if (st !== 'pending_review' && st !== 'approved' && st !== 'exempt') return send(res, 403, { error: 'onboarding_incomplete', message: 'Complete onboarding before choosing a plan' });
+        const plan = PLANS[String(body.tier || '')];
+        if (!plan) return send(res, 400, { error: 'Unknown plan' });
+        me2.plan = { tier: plan.id, name: plan.name, pricePence: plan.pricePence, label: plan.label, chosenAt: iso(now()), status: 'pilot_free' };
+        log('ok', `${me2.name} chose ${plan.name} (${plan.label}) — free during pilot, billing per Terms §6 after 30 days’ notice`);
+        broadcast('state'); save();
+        return send(res, 200, { ok: true, me: mePayload(me2) });
+      }
+      /* ---- admin: review onboarding submissions ---- */
+      let mr = p.match(/^\/api\/admin\/onboarding\/(usr_[\w-]+)\/review$/);
+      if (mr) {
+        const me2 = sessionUser(req);
+        if (!isAdminU(me2)) return send(res, 403, { error: 'Fleet admin only' });
+        const target = state.users.find((x) => x.id === mr[1]);
+        if (!target || !target.onboarding) return send(res, 404, { error: 'No onboarding record for that account' });
+        const approve = body.approve === true;
+        target.onboarding.status = approve ? 'approved' : 'rejected';
+        target.onboarding.reviewedAt = iso(now()); target.onboarding.reviewedBy = me2.name;
+        target.onboarding.reviewNote = approve ? null : String(body.note || 'Please re-upload clearer documents').slice(0, 200);
+        log(approve ? 'ok' : 'warn', `Onboarding ${approve ? 'approved ✓' : 'rejected ✗'} for ${target.name} by ${me2.name.split(' ')[0]}`);
+        broadcast('state'); save();
+        return send(res, 200, { ok: true });
       }
       if (p === '/api/auth/logout') {
         const tok = parseCookies(req).ff_session;

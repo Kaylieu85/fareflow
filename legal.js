@@ -4,7 +4,7 @@
    before commercial rollout — see BILLING-LAYER.md guardrails. */
 
 const TOS_VERSION = '1.0';
-const PRIVACY_VERSION = '1.0';
+const PRIVACY_VERSION = '1.1';
 const UPDATED = '8 August 2026';
 const CONTACT = 'support@fareflow.uk';
 
@@ -13,7 +13,7 @@ const TERMS_HTML = `
 <p>FareFlow ("<b>FareFlow</b>", "we", "us") is a software tool — a channel manager and digital diary — for licensed UK private-hire drivers and fleet operators. These Terms &amp; Conditions of Use ("<b>Terms</b>") form a contract between you and FareFlow governing your use of the FareFlow web application, companion features and related services (the "<b>Service</b>").</p>
 <p><b>FareFlow is not a private-hire operator.</b> We do not take bookings from the public, do not dispatch work on our own account, do not set fares and do not take payment from riders. Your contracts for transport services remain with the platforms and licensed operators you work for. Accepting private-hire bookings without an operator licence is an offence; FareFlow is software for drivers and operators who hold their own licences.</p>
 <h3>2. Your account</h3>
-<p>You must be 18 or over and hold (or work under) valid UK private-hire licensing — driver licence, vehicle licence and, where relevant, operator licence — and any local requirements (e.g. Transport for London PCO licensing). You must keep your registration details accurate, keep your password confidential and tell us promptly of any unauthorised use. You are responsible for everything done under your account.</p>
+<p>You must be 18 or over and hold (or work under) valid UK private-hire licensing — driver licence, vehicle licence and, where relevant, operator licence — and any local requirements (e.g. Transport for London PCO licensing). <b>Verification:</b> before using the Service you must verify your email address and complete onboarding, providing your full legal name, date of birth, home address, PCO/private-hire licence number, an image of your licence and a driver photo. Onboarding submissions are reviewed; providing false or misleading documents leads to account closure. You must keep your registration details accurate, keep your password confidential and tell us promptly of any unauthorised use. You are responsible for everything done under your account.</p>
 <h3>3. What the Service does (and does not do)</h3>
 <p>The Service consolidates your work offers and bookings into one diary, prevents double bookings, provides journey/navigation assistance, duty statuses, fleet views, analytics and optional automations. The Service is a productivity aid only:</p>
 <ul>
@@ -52,6 +52,7 @@ const PRIVACY_HTML = `
 <ul>
 <li><b>Account data</b> — name, email, mobile number, password (stored only as a salted scrypt hash).</li>
 <li><b>Driver profile</b> — vehicle, registration, PCO/licence numbers, platform driver IDs you link.</li>
+<li><b>Identity &amp; compliance documents</b> — date of birth, home address, PCO/private-hire licence number, an image of your licence and a driver photo, collected at onboarding to verify your account and reviewed by fleet admins. Visible only to you and fleet review; never shared with platforms or third parties.</li>
 <li><b>Operational data</b> — bookings and offers (times, places, fares), rider first name and phone number, rider messages, pickup codes, duty status history, journey timestamps.</li>
 <li><b>Technical data</b> — login/session tokens, device-capture heartbeat times, IP and user-agent for security logging.</li>
 </ul>
@@ -64,7 +65,7 @@ const PRIVACY_HTML = `
 <h3>4. What we never do</h3>
 <p><b>We never sell personal data. We never share rider or driver data with advertisers, data brokers, or ride-hailing platforms.</b> We never use rider contact details for marketing. Companion capture is read-only on your own device and only processes what is already shown to you.</p>
 <h3>5. Retention — automatic privacy sweeps</h3>
-<p>Completed and cancelled bookings, and message bodies, are <b>automatically scrubbed of personal details</b> (rider name, phone, notes) once they are older than your fleet's retention setting — default <b>90 days</b>, configurable to 30 days or 1 year (Settings → Privacy retention). Factual records (dates, fares, distances) are kept anonymised for your earnings history. The system also notifies riders of ETAs by SMS only when a booking is confirmed, using the minimum data needed. Data is removed from active systems at the end of the retention window.</p>
+<p>Completed and cancelled bookings, and message bodies, are <b>automatically scrubbed of personal details</b> (rider name, phone, notes) once they are older than your fleet's retention setting — default <b>90 days</b>, configurable to 30 days or 1 year (Settings → Privacy retention). Factual records (dates, fares, distances) are kept anonymised for your earnings history. The system also notifies riders of ETAs by SMS only when a booking is confirmed, using the minimum data needed. Data is removed from active systems at the end of the retention window. Onboarding identity documents (licence image, driver photo and address details) are kept while your account is active and deleted on account closure.</p>
 <h3>6. Security</h3>
 <ul>
 <li>All traffic encrypted in transit (HTTPS/TLS); hosting in the EEA (Frankfurt, EU) on Render.</li>

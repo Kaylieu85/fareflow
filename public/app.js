@@ -401,6 +401,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 /* ============================================================== RENDERING */
 function render() {
   if (!S.state || !S.authed) return;
+  if (S.gateStage && S.gateStage !== 'done') return; // onboarding gate owns the screen right now
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === S.route));
   const pending = Object.values(S.state.requests).filter((r) => r.status === 'pending');
   const badge = $('#reqBadge');
@@ -1090,11 +1091,16 @@ function renderFleet() {
       </div>
     </div>`;
   };
+  if (typeof isAdmin === 'function' && isAdmin()) setTimeout(loadOnboardings, 0);
   return `
   <div class="page-head">
     <div><h1 class="page-title">Fleet</h1>
     <div class="page-desc">Every driver gets their own routed diary under one account. Off-duty drivers keep existing bookings but get no new routed jobs.</div></div>
   </div>
+  ${typeof isAdmin === 'function' && isAdmin() ? `<div class="panel" style="margin-bottom:16px">
+    <h3 style="margin-top:0">🪪 Onboarding reviews <span class="muted" style="font-size:11.5px;font-weight:500">— verify new drivers’ identity &amp; PCO licence</span></h3>
+    <div id="obReview"><div class="muted" style="font-size:12.5px">Loading…</div></div>
+  </div>` : ''}
   <div class="fleet-grid">
     ${S.state.drivers.map(card).join('')}
     <button class="dr-add" onclick="openDriverModal()">＋ Add driver</button>
@@ -1762,6 +1768,8 @@ setInterval(() => {
 
 /* ----------------------------------------------------------------- boot */
 function setRoute() {
+  const stage = typeof onboardingStage === 'function' ? onboardingStage() : 'done';
+  if (stage !== 'done') { renderGate(stage); return; } // verification/onboarding/plan flow owns the screen
   const r = (location.hash.replace('#/', '') || 'diary').split('?')[0];
   S.route = ['diary', 'requests', 'map', 'demand', 'fleet', 'channels', 'messages', 'earnings', 'api', 'settings', 'faq', 'howto', 'support'].includes(r) ? r : 'diary';
   render();
@@ -1780,7 +1788,7 @@ function startAuthed() {
       navigator.serviceWorker.addEventListener('controllerchange', () => location.reload());
     }
   }
-  setRoute();
+  enterApp();
 }
 
 /* ---------------------------------------------------------- auth screens */
@@ -1878,9 +1886,11 @@ async function doRegister(e) {
   e.preventDefault();
   if (!$('#regAgree').checked) { authError('Please accept the Terms & Conditions and Privacy Policy to create your account'); return false; }
   try {
-    const { me } = await api('/api/auth/register', 'POST', {
+    const j = await api('/api/auth/register', 'POST', {
       name: $('#regName').value, email: $('#regEmail').value, phone: $('#regPhone').value, password: $('#regPw').value, agree: true,
     });
+    const { me } = j;
+    if (j.demoCode) S.demoCode = j.demoCode;
     S.me = me;
     const { state, serverTime } = await api('/api/state');
     S.state = state; S.serverTimeOffset = new Date(serverTime) - Date.now();
@@ -1894,6 +1904,227 @@ async function logout() {
   location.reload();
 }
 
+/* ============================ verification · onboarding · plan gate ============================ */
+function onboardingStage() {
+  const m = S.me;
+  if (!m) return 'none';
+  const st = (m.onboarding && m.onboarding.status) || 'new';
+  if (st === 'exempt') return 'done';                       // legacy pilot accounts skip the flow
+  if (!m.emailVerifiedAt) return 'verify';
+  if (st === 'new' || st === 'rejected') return 'form';
+  if (!m.plan) return 'plan';
+  return 'done';
+}
+function enterApp() {
+  const stage = onboardingStage();
+  if (stage === 'done') { S.gateStage = null; setRoute(); return; }
+  renderGate(stage, true);
+}
+function renderGate(stage, force) {
+  const view = $('#view');
+  if (!force && S.gateStage === stage && $('#gateCard')) return; // SSE refreshes must not clobber a half-filled form
+  S.gateStage = stage;
+  if (stage === 'verify') { view.innerHTML = gateVerifyHtml(); setTimeout(() => { const i = $('#vfCode'); if (i) i.focus(); }, 80); }
+  else if (stage === 'form') view.innerHTML = gateFormHtml();
+  else if (stage === 'plan') view.innerHTML = gatePlanHtml();
+}
+const gateShell = (step, total, title, sub, inner) => `
+  <div class="gate-wrap"><div class="panel gate-card" id="gateCard">
+    <div class="gate-steps">${Array.from({ length: total }, (_, i) => `<span class="gate-dot${i + 1 <= step ? ' on' : ''}"></span>`).join('')}</div>
+    <h2 style="margin:2px 0 4px">${title}</h2>
+    <p class="muted" style="font-size:13px;margin:0 0 16px">${sub}</p>
+    ${inner}
+  </div></div>`;
+
+/* ---- step 1: verify email ---- */
+function gateVerifyHtml() {
+  return gateShell(1, 3, '📧 Verify your email', `We sent a 6-digit code to <b>${esc(S.me.email || '')}</b>. Enter it below to unlock onboarding.`, `
+    <div class="demo-inbox">
+      <div class="di-t">📬 Demo inbox <span>email gateway is simulated in this build</span></div>
+      ${S.demoCode ? `<div class="di-code">${S.demoCode}</div><div class="di-s">Your FareFlow verification code — expires in 10 minutes (in production this arrives by real email)</div>` : `<div class="di-s">No email here yet — tap “Resend code”.</div>`}
+    </div>
+    <div class="form-row"><label>6-digit verification code</label>
+      <input class="input" id="vfCode" inputmode="numeric" maxlength="6" placeholder="••••••" style="letter-spacing:6px;font-size:20px;text-align:center;font-weight:800" onkeydown="if(event.key==='Enter')doVerify()">
+    </div>
+    <button class="btn primary" style="width:100%;justify-content:center;padding:12px" onclick="doVerify()">Verify email →</button>
+    <div style="display:flex;justify-content:space-between;margin-top:12px;font-size:12.5px">
+      <a href="javascript:void(0)" onclick="doResend()" style="color:var(--accent)">Resend code</a>
+      <a href="javascript:void(0)" onclick="logout()" class="muted">Sign out</a>
+    </div>`);
+}
+async function doVerify() {
+  const code = ($('#vfCode').value || '').trim();
+  if (code.length !== 6) return toast('Enter the 6-digit code', 'err');
+  try {
+    const j = await api('/api/auth/verify-email', 'POST', { code });
+    S.me = j.me; S.demoCode = null;
+    toast('Email verified ✅ — let’s finish setting you up', 'ok');
+    enterApp();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function doResend() {
+  try {
+    const j = await api('/api/auth/send-verification', 'POST', {});
+    if (j.demoCode) S.demoCode = j.demoCode;
+    renderGate('verify', true);
+    toast('New code sent — check the demo inbox', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- step 2: onboarding details + documents ---- */
+const obUp = { licence: null, photo: null };
+function gateFormHtml() {
+  const rejected = S.me.onboarding && S.me.onboarding.status === 'rejected';
+  const maxDob = new Date(Date.now() - 18 * 365.25 * 86400000).toISOString().slice(0, 10);
+  obUp.licence = null; obUp.photo = null;
+  return gateShell(2, 3, '🪪 Driver onboarding', 'Platforms don’t share driver data, so we verify you directly. Only you and fleet review can see these documents.', `
+    ${rejected ? `<div class="fairuse needed" style="margin-bottom:12px"><div class="fu-t">⚠️ Review requested changes</div><div class="fu-d">${esc(S.me.onboarding.reviewNote || 'Please re-submit with clearer documents.')}</div></div>` : ''}
+    <div class="form-row"><label>Full legal name (as on your licence)</label><input class="input" id="obName" value="${esc(S.me.name || '')}"></div>
+    <div class="form-row"><label>Date of birth</label><input class="input" id="obDob" type="date" max="${maxDob}"></div>
+    <div class="form-row"><label>Address line 1</label><input class="input" id="obL1" placeholder="12 Example Street" autocomplete="address-line1"></div>
+    <div class="form-row"><label>Address line 2 <span class="muted">(optional)</span></label><input class="input" id="obL2" autocomplete="address-line2"></div>
+    <div class="ob-grid">
+      <div class="form-row"><label>Town / city</label><input class="input" id="obCity" placeholder="London" autocomplete="address-level2"></div>
+      <div class="form-row"><label>Postcode</label><input class="input" id="obPc" placeholder="E1 6AN" autocomplete="postal-code" style="text-transform:uppercase"></div>
+    </div>
+    <div class="form-row"><label>PCO / private-hire licence number</label><input class="input" id="obPco" placeholder="PCO-123456" style="text-transform:uppercase"></div>
+    <div class="ob-grid" style="margin-top:4px">
+      <div class="ob-up">
+        <div class="t">📄 PCO licence image</div>
+        <div class="d">Clear photo of the licence, all four corners visible</div>
+        <label class="btn sm ghost" style="justify-content:center">Choose / take photo<input type="file" accept="image/*" capture="environment" style="display:none" onchange="obFile(this,'licence')"></label>
+        <img id="prevLic" class="ob-prev hidden" alt="">
+        <div class="ob-state" id="upLicState"></div>
+      </div>
+      <div class="ob-up">
+        <div class="t">🤳 Driver photo</div>
+        <div class="d">Face clearly visible, no sunglasses — like a passport photo</div>
+        <label class="btn sm ghost" style="justify-content:center">Choose / take photo<input type="file" accept="image/*" capture="user" style="display:none" onchange="obFile(this,'photo')"></label>
+        <img id="prevSelf" class="ob-prev hidden" alt="">
+        <div class="ob-state" id="upSelfState"></div>
+      </div>
+    </div>
+    <button class="btn primary" style="width:100%;justify-content:center;padding:12px;margin-top:14px" onclick="obSubmit()">Submit for review →</button>
+    <div class="muted" style="font-size:11.5px;margin-top:8px">Stored encrypted-in-transit, visible only to you and fleet review, deleted when your account closes — see the <a href="/privacy" target="_blank" rel="noopener">Privacy &amp; Data Security Policy</a>.</div>`);
+}
+function obFile(input, kind) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  if (!/^image\//.test(f.type)) return toast('Choose an image file', 'err');
+  const rd = new FileReader();
+  rd.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const MAX = 1280;
+      const sc = Math.min(1, MAX / Math.max(img.width, img.height));
+      const w = Math.max(1, Math.round(img.width * sc)), h = Math.max(1, Math.round(img.height * sc));
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      obUpload(kind, cv.toDataURL('image/jpeg', 0.85));
+    };
+    img.src = rd.result;
+  };
+  rd.readAsDataURL(f);
+}
+async function obUpload(kind, dataUrl) {
+  const prev = $(kind === 'licence' ? '#prevLic' : '#prevSelf');
+  if (prev) { prev.src = dataUrl; prev.classList.remove('hidden'); }
+  const lbl = $(kind === 'licence' ? '#upLicState' : '#upSelfState');
+  if (lbl) lbl.textContent = 'Uploading…';
+  try {
+    const j = await api('/api/onboarding/photo', 'POST', { kind, dataUrl });
+    obUp[kind] = j.file;
+    if (lbl) lbl.textContent = '✅ Uploaded';
+  } catch (e) { obUp[kind] = null; if (lbl) lbl.textContent = '❌ Failed — try again'; toast(e.message, 'err'); }
+}
+async function obSubmit() {
+  const payload = {
+    fullName: $('#obName').value.trim(), dob: $('#obDob').value,
+    line1: $('#obL1').value.trim(), line2: $('#obL2').value.trim(),
+    city: $('#obCity').value.trim(), postcode: $('#obPc').value.trim(), pcoNumber: $('#obPco').value.trim(),
+  };
+  if (!payload.fullName || !payload.dob || !payload.line1 || !payload.city || !payload.postcode || !payload.pcoNumber) return toast('Fill in every required field', 'err');
+  if (!obUp.licence || !obUp.photo) return toast('Upload both documents: PCO licence image and driver photo', 'err');
+  try {
+    await api('/api/onboarding/details', 'POST', payload);
+    const j = await api('/api/onboarding/submit', 'POST', {});
+    S.me = j.me;
+    toast('📨 Onboarding sent for fleet review — now choose your plan', 'ok');
+    enterApp();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- step 3: choose the plan (billing parked — free during pilot) ---- */
+function gatePlanHtml() {
+  const card = (tier, emoji, name, price, blurb, extra, hot) => `
+    <div class="plan-card${hot ? ' hot' : ''}">
+      ${hot ? '<div class="plan-hot">PILOT OFFER</div>' : ''}
+      <div class="plan-e">${emoji}</div>
+      <div class="plan-n">${name}</div>
+      <div class="plan-p">${price}</div>
+      <div class="plan-b">${blurb}</div>
+      ${extra}
+      <button class="btn primary" style="width:100%;justify-content:center;margin-top:10px" onclick="choosePlan('${tier}')">Choose ${name}</button>
+    </div>`;
+  return gateShell(3, 3, '💳 Choose your package', 'Pick now, pay nothing yet — every plan is free for the whole pilot. Billing only starts after 30 days’ written notice (Terms §6), and you can export and leave any time.', `
+    <div class="plan-grid">
+      ${card('founding', '🏆', 'Founding Driver', '£4/mo <span>for life</span>', 'First 50 drivers. Your price never rises — in return for a review and a WhatsApp-group shout-out.', '<div class="plan-f">Everything in Pro</div>', true)}
+      ${card('solo', '🚕', 'Solo', '£6/mo', 'Unified diary, journey mode, duty statuses, unlimited channels, clash protection.', '<div class="plan-f">For independent drivers</div>', false)}
+      ${card('pro', '⚡', 'Pro', '£9/mo', 'Solo + auto-accept profitable jobs, demand heatmaps, earnings & tax exports.', '<div class="plan-f">Companion capture +£3/mo add-on</div>', false)}
+    </div>
+    <div class="muted" style="font-size:11.5px;margin-top:10px">Onboarding is with fleet review in the background — you’re in already; approval status lands in Settings.</div>`);
+}
+async function choosePlan(tier) {
+  try {
+    const j = await api('/api/billing/plan', 'POST', { tier });
+    S.me = j.me;
+    toast(`Welcome to ${j.me.plan.name} — free during the pilot 🎉`, 'ok');
+    enterApp();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- admin: onboarding review panel (fleet page) ---- */
+async function loadOnboardings() {
+  const host = $('#obReview');
+  if (!host) return;
+  try {
+    const { rows } = await api('/api/admin/onboardings');
+    if (!rows.length) { host.innerHTML = '<div class="muted" style="font-size:12.5px">No onboarding submissions yet — new driver registrations land here for review.</div>'; return; }
+    host.innerHTML = rows.map((r) => {
+      const age = r.dob ? Math.floor((Date.now() - new Date(r.dob).getTime()) / (365.25 * 86400000)) : null;
+      const addr = r.address ? [r.address.line1, r.address.line2, r.address.city, r.address.postcode].filter(Boolean).join(', ') : '—';
+      const chip = r.status === 'approved' ? '<span class="ob-chip ok">✅ approved</span>'
+        : r.status === 'rejected' ? '<span class="ob-chip no">❌ rejected</span>' : '<span class="ob-chip wait">⏳ pending review</span>';
+      return `<div class="ob-row">
+        <div style="flex:1;min-width:200px">
+          <div style="font-weight:800">${esc(r.fullName)} ${chip}</div>
+          <div class="muted" style="font-size:12px">${esc(r.email)}${r.phone ? ' · ' + esc(r.phone) : ''}${r.plan ? ' · plan: ' + esc(r.plan) : ''}</div>
+          <div class="muted" style="font-size:12px">🎂 ${r.dob || '—'}${age ? ` (${age})` : ''} · 🪪 ${esc(r.pcoNumber || '—')}</div>
+          <div class="muted" style="font-size:12px">🏠 ${esc(addr)}</div>
+          ${r.reviewNote ? `<div style="font-size:12px;color:#FDA4AF">Note: ${esc(r.reviewNote)}</div>` : ''}
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+            ${r.licenceImg ? `<a class="btn sm ghost" href="/uploads/${esc(r.licenceImg)}" target="_blank" rel="noopener">📄 Licence image</a>` : ''}
+            ${r.photoImg ? `<a class="btn sm ghost" href="/uploads/${esc(r.photoImg)}" target="_blank" rel="noopener">🤳 Driver photo</a>` : ''}
+          </div>
+        </div>
+        ${r.status === 'pending_review' ? `<div style="display:flex;flex-direction:column;gap:6px">
+          <button class="btn sm primary" onclick="reviewOb('${r.userId}', true)">Approve ✓</button>
+          <button class="btn sm danger ghost" onclick="reviewOb('${r.userId}', false)">Reject ✗</button>
+        </div>` : ''}
+      </div>`;
+    }).join('');
+  } catch (e) { host.innerHTML = ''; }
+}
+async function reviewOb(userId, approve) {
+  let note = null;
+  if (!approve) { note = prompt('Reason to show the driver (e.g. licence image unreadable):', 'Please re-upload a clearer photo of your PCO licence'); if (note === null) return; }
+  try {
+    await api(`/api/admin/onboarding/${userId}/review`, 'POST', { approve, note });
+    toast(approve ? 'Driver approved ✓' : 'Sent back for changes', approve ? 'ok' : 'warn');
+    loadOnboardings();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
 /* ------------------------------------------------------ profile & help hub */
 function openProfile() {
   if (!S.me) return;
@@ -1905,6 +2136,7 @@ function openProfile() {
         <div style="font-weight:900;font-size:16px">${esc(S.me.name)}</div>
         <div class="muted" style="font-size:12.5px">${esc(S.me.email || '')}${S.me.phone ? ' · ' + esc(S.me.phone) : ''}</div>
         ${drv ? `<div class="muted" style="font-size:12px">🚗 ${esc(drv.vehicle)}${drv.reg ? ' · ' + esc(drv.reg) : ''}${drv.pco ? ' · PCO ' + esc(drv.pco) : ''}</div>` : '<div class="muted" style="font-size:12px">👔 Fleet owner account</div>'}
+        <div class="muted" style="font-size:12px;margin-top:2px">${S.me.plan ? `💳 ${esc(S.me.plan.name)} — free during pilot` : (S.me.onboarding && S.me.onboarding.status === 'pending_review' ? '🪪 Onboarding under fleet review' : '')}</div>
       </div>
     </div>
     <div class="prof-menu">
@@ -1920,7 +2152,8 @@ function openProfile() {
 const FAQ_ITEMS = [
   ['What exactly is FareFlow?', 'A channel manager for drivers — the same idea as hotel tools that stop double bookings across Booking.com and Expedia. Every job offer from every app lands in one inbox; accept once and that slot (plus your buffer) is blocked everywhere else automatically.'],
   ['How do I install it on my phone?', 'iPhone: open the app link in <b>Safari → Share → Add to Home Screen</b>. Android: open in <b>Chrome → ⋮ → Install app</b>. It then runs fullscreen like a native app. See the How-to guides for pictures-in-words.'],
-  ['How do I sign in?', 'With your <b>email or mobile number</b> plus your password — either works on the same account. New here? Tap <b>Create an account</b> on the sign-in screen and your driver profile is set up automatically.'],
+  ['How do I sign in?', 'With your <b>email or mobile number</b> plus your password — either works on the same account. New here? Tap <b>Create an account</b> on the sign-in screen. You’ll then <b>verify your email</b> (6-digit code), complete <b>onboarding</b> (legal name, date of birth, address, PCO licence number + licence image and a driver photo) and <b>choose a plan</b> — then you’re straight into your diary.'],
+  ['Why do I have to verify my email and upload my PCO licence?', 'Ride-hailing platforms don’t share driver data, so we verify drivers directly instead — it keeps fraudulent accounts out of the fleet and protects your bookings. Your licence image and driver photo are visible only to you and fleet review, never shared with platforms or third parties, and are deleted if your account closes. Full details in the <a href="/privacy" target="_blank">Privacy &amp; Data Security Policy</a>.'],
   ['How does FareFlow know which app jobs are mine?', 'Every company gives you a driver number (Uber ID, Bolt ID…). Link each app in <b>Settings → App connections</b> using that number, and the router only sends that app’s work to drivers linked on it.'],
   ['What is journey mode? (the 🚗 driving lock)', 'Open your booking and tap <b>▶ Start journey</b> — Google Maps opens to the pickup and FareFlow locks everything else so you can’t fiddle with the app while driving. You get a live journey clock, big tap-target navigation buttons, and only ONE thing can interrupt you: new job offers, with a 20-second countdown that declines itself if ignored. Tap <b>✓ Rider on board</b> when they get in to switch navigation to the drop-off, then <b>🏁 Complete job</b> on arrival — you’re instantly back online for the next job.'],
   ['Why did my job decline itself?', 'Two possibilities: the offer expired (offers live 40–80 seconds, like the real apps), or a clashing booking existed — clashing offers are politely declined to protect your acceptance rating.'],

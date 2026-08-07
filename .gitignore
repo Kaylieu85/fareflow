@@ -2,3 +2,5 @@ data.json
 cloudflared
 node_modules/
 *.log
+
+uploads/
