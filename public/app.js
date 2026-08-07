@@ -37,7 +37,7 @@ function timeLabel(ts) {
 }
 function driverClashLocal(driverId, startTs, endTs) {
   return blocks().find((b) => (b.driverId === driverId || b.driverId === 'all') &&
-    (b.status === 'confirmed' || b.status === 'in-progress') &&
+    (b.status === 'confirmed' || b.status === 'in-progress' || b.status === 'on_journey') &&
     new Date(startTs) < new Date(b.end) && new Date(endTs) > new Date(b.start));
 }
 
@@ -184,6 +184,113 @@ function popBooking(b) {
   setTimeout(() => { if (el.isConnected) kill(); }, 14000);
 }
 
+/* --------------------------------------------------- journey mode (safety lock) */
+const myDriver = () => (S.me && S.me.driverId && S.state) ? S.state.drivers.find((d) => d.id === S.me.driverId) || null : null;
+function journeyBlock() {
+  const d = myDriver();
+  if (!d || d.status !== 'on_journey' || !d.journeyBlockId) return null;
+  const b = S.state.blocks[d.journeyBlockId];
+  return b && b.status === 'on_journey' ? b : null;
+}
+const journeyActive = () => !!journeyBlock();
+const placeQ = (p) => (p ? [p.n, p.pc].filter(Boolean).join(', ') : '');
+const navUrl = (p) => 'https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=' + encodeURIComponent(placeQ(p));
+const appleNavUrl = (p) => 'https://maps.apple.com/?dirflg=d&daddr=' + encodeURIComponent(placeQ(p));
+function fmtElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  const mm = h ? String(m).padStart(2, '0') : String(m);
+  return (h ? h + ':' : '') + mm + ':' + String(ss).padStart(2, '0');
+}
+async function startJourney(id) {
+  const b = S.state.blocks[id];
+  if (!b) return;
+  /* gesture-safe: open navigation first, then flip server state (journey screen also has a nav button) */
+  try { window.open(navUrl(b.pickup || b.dropoff), '_blank'); } catch {}
+  try {
+    await api(`/api/blocks/${id}/journey/start`, 'POST');
+    closeModal();
+    toast('🚗 Journey started — everything else is locked. Drive safe!', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  refresh();
+}
+async function journeyLeg(id) {
+  const b = S.state.blocks[id];
+  if (!b) return;
+  try { window.open(navUrl(b.dropoff), '_blank'); } catch {}
+  try { await api(`/api/blocks/${id}/journey/leg`, 'POST', { leg: 'to_dropoff' }); toast('✓ Rider on board — heading to drop-off', 'ok'); } catch (e) { toast(e.message, 'err'); }
+  refresh();
+}
+async function completeJourney(id) {
+  try {
+    await api(`/api/blocks/${id}/journey/complete`, 'POST');
+    chime();
+    if (navigator.vibrate) try { navigator.vibrate([120, 50, 120]); } catch {}
+    toast('✅ Job complete — you’re back online and receiving jobs', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  refresh();
+}
+async function abortJourney(id) {
+  if (!confirm('End this journey early? (rider no-show, job fell through…)\nThe job goes back to “confirmed” so you can restart it — or cancel it from the diary once unlocked.')) return;
+  try { await api(`/api/blocks/${id}/journey/abort`, 'POST'); toast('Journey ended — job is back to confirmed', 'warn'); } catch (e) { toast(e.message, 'err'); }
+  refresh();
+}
+/* keep the screen awake while driving so navigation stays visible */
+let wakeLock = null;
+async function acquireWakeLock() {
+  try {
+    if (!('wakeLock' in navigator) || wakeLock) return;
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch {}
+}
+function releaseWakeLock() { try { if (wakeLock) wakeLock.release(); } catch {} wakeLock = null; }
+document.addEventListener('visibilitychange', () => { if (!document.hidden && journeyActive()) acquireWakeLock(); });
+let jlTimer = null;
+function renderJourneyLock() {
+  const root = document.getElementById('journeyLock');
+  if (!root) return;
+  const b = journeyBlock();
+  clearInterval(jlTimer); jlTimer = null;
+  if (!b) { root.innerHTML = ''; root.classList.add('hidden'); releaseWakeLock(); return; }
+  root.classList.remove('hidden');
+  const c = ch(b.channelId);
+  const j = b.journey || {};
+  const leg = j.leg === 'to_dropoff' ? 'to_dropoff' : 'to_pickup';
+  const target = leg === 'to_dropoff' ? b.dropoff : b.pickup;
+  const startedAt = j.startedAt ? new Date(j.startedAt).getTime() : Date.now();
+  const stop = (p, lbl, nowLeg) => p ? `<div class="jl-stop${leg === nowLeg ? ' now' : ''}">
+      <i class="jl-dot ${nowLeg === 'to_pickup' ? 'a' : 'b'}"></i>
+      <div><div class="jl-lbl">${lbl}${leg === nowLeg ? ' <span class="jl-nowtag">HEADING HERE</span>' : leg !== nowLeg && nowLeg === 'to_pickup' ? ' <span class="jl-donetag">✓ done</span>' : ''}</div>
+      <div class="jl-place">${esc(p.n || '')}</div>${p.pc ? `<div class="jl-pc">${esc(p.pc)}</div>` : ''}</div></div>` : '';
+  root.innerHTML = `<div class="jl-screen" style="--jl:${c.color}" role="alertdialog" aria-label="On journey — app locked for safety">
+    <div class="jl-inner">
+      <div class="jl-badge"><span class="jl-pulse"></span>🚗 ON JOURNEY</div>
+      <div class="jl-elapsed">${fmtElapsed(Date.now() - startedAt)}</div>
+      <div class="jl-sub">${esc(c.name)}${b.fare ? ' · ' + GBP(b.fare) : ''} · ${esc(b.rider || 'Rider')}</div>
+      <div class="jl-route">
+        ${stop(b.pickup, leg === 'to_pickup' ? 'PICKUP' : 'PICKUP', 'to_pickup')}
+        ${stop(b.dropoff, 'DROP-OFF', 'to_dropoff')}
+      </div>
+      ${target ? `<a class="jl-nav" href="${navUrl(target)}" target="_blank" rel="noopener">🧭 Navigate to ${leg === 'to_dropoff' ? 'drop-off' : 'pickup'} (Google Maps)</a>` : ''}
+      ${target ? `<a class="jl-apple" href="${appleNavUrl(target)}" target="_blank" rel="noopener">Open in Apple Maps instead →</a>` : ''}
+      ${leg === 'to_pickup'
+        ? `<button class="jl-leg" onclick="journeyLeg('${b.id}')">✓ Rider on board — navigate to drop-off</button>`
+        : ''}
+      <button class="jl-complete" onclick="completeJourney('${b.id}')">🏁 ${leg === 'to_dropoff' ? 'Arrived — complete job · back online' : 'Complete job · back online'}</button>
+      ${b.code && !b.pickupVerifiedAt && leg === 'to_pickup' ? `<div class="jl-code">Rider pickup code <b>${esc(String(b.code))}</b></div>` : ''}
+      <div class="jl-note">🔒 Everything else is locked while you drive. New job offers still pop up — you get <b>20 seconds</b> to accept.</div>
+      <button class="jl-abort" onclick="abortJourney('${b.id}')">Problem? End journey early</button>
+    </div>
+  </div>`;
+  acquireWakeLock();
+  jlTimer = setInterval(() => {
+    const el = root.querySelector('.jl-elapsed');
+    if (!el || !journeyActive()) { clearInterval(jlTimer); jlTimer = null; return; }
+    el.textContent = fmtElapsed(Date.now() - startedAt);
+  }, 1000);
+}
+
 /* ------------------------- incoming request modal (centre-screen respond) */
 function queueRequest(r) {
   if (!S.state || !r || !r.id) return;
@@ -191,6 +298,7 @@ function queueRequest(r) {
   const live = S.state.requests[r.id];
   if (live && live.status !== 'pending') return;
   r._ttlMs = Math.max(5000, new Date(r.expiresAt) - Date.now() + (S.serverTimeOffset || 0));
+  if (journeyActive() && r._ttlMs > 20000) { r._ttlMs = 20000; r._quick = true; } /* safety: 20s accept window while driving */
   r._t0 = Date.now();
   S.reqQueue.push(r);
   chime(); setTimeout(chime, 450);
@@ -211,7 +319,7 @@ function showNextReq() {
       <div class="rq-top">
         <span class="rq-pill">${esc(r.channel)}</span>
         ${r.asap ? '<span class="rq-asap">🔥 ASAP pickup</span>' : ''}
-        <span class="rq-mini">${other ? `+${other} more waiting` : ''}</span><span class="rq-live">● LIVE</span>
+        <span class="rq-mini">${other ? `+${other} more waiting` : ''}</span>${r._quick ? '<span class="rq-jtag">⚡ <span class="rq-cd">20s</span> — on journey</span>' : ''}<span class="rq-live">● LIVE</span>
       </div>
       <div class="rq-fare">£${(+r.fare || 0).toFixed(2)}</div>
       <div class="rq-line"><b>${esc(r.rider)}</b> · offered to <b>${esc(r.driver)}</b></div>
@@ -233,7 +341,9 @@ function tickTtl(r) {
   const remain = Math.max(0, r._ttlMs - (Date.now() - r._t0));
   const bar = root.querySelector('.rq-ttl i');
   if (bar) bar.style.width = (remain / r._ttlMs * 100).toFixed(1) + '%';
-  if (remain <= 0) { dismissReq(r.id, true); return; }
+  const cd = root.querySelector('.rq-cd');
+  if (cd) cd.textContent = Math.ceil(remain / 1000) + 's';
+  if (remain <= 0) { /* while driving, a timed-out offer is declined so nothing lingers */ if (journeyActive()) respondReq(r.id, false); else dismissReq(r.id, true); return; }
   setTimeout(() => tickTtl(r), 250);
 }
 function dismissReq(id, expired) {
@@ -291,12 +401,13 @@ function render() {
   else if (S.route === 'howto') view.innerHTML = renderHowto();
   else if (S.route === 'support') view.innerHTML = renderSupport();
   positionNowLine();
+  renderJourneyLock();
 }
 function driverFilterChips() {
   return `<div class="drv-filters">
     <span class="drv-f ${S.driverFilter === 'all' ? 'on' : ''}" onclick="setDriverFilter('all')">👥 Everyone</span>
     ${S.state.drivers.map((d) => `<span class="drv-f ${S.driverFilter === d.id ? 'on' : ''}" onclick="setDriverFilter('${d.id}')">
-      <span class="cdot" style="background:${d.color}"></span>${esc(d.name)}${d.status !== 'online' ? ' (off)' : ''}</span>`).join('')}
+      <span class="cdot" style="background:${d.color}"></span>${esc(d.name)}${d.status === 'on_journey' ? ' 🚗' : d.status !== 'online' ? ' (off)' : ''}</span>`).join('')}
   </div>`;
 }
 function setDriverFilter(id) { S.driverFilter = id; render(); }
@@ -341,7 +452,7 @@ function renderDiary() {
   let lanes;
   if (S.driverFilter === 'all') {
     lanes = S.state.drivers
-      .filter((d) => d.status === 'online' || allFiltered.some((b) => b.driverId === d.id))
+      .filter((d) => d.status === 'online' || d.status === 'on_journey' || allFiltered.some((b) => b.driverId === d.id))
       .map((d) => d.id);
     if (!lanes.length) lanes = S.state.drivers.map((d) => d.id);
     if (allFiltered.some((b) => b.driverId === 'all')) lanes = ['all', ...lanes];
@@ -373,8 +484,8 @@ function renderDiary() {
         const w = laneW / nCols;
         html += `<div class="blk ${b.kind} ${b.status}${b.driverId === 'all' ? ' fleet-block' : ''}" style="top:${top}px;height:${h}px;left:${li * laneW + col * w}%;width:calc(${w}% - 3px);border-left-color:${c.color}"
           onclick="openBlockModal('${b.id}')" title="${esc(`${title} — ${fmtHM(b.start)}–${fmtHM(b.end)}`)}">
-          <div class="b-t">${title}${b.pickupVerifiedAt ? ' <span style="color:var(--lime)">✓</span>' : ''}</div>
-          ${h >= 46 ? `<div class="b-s">${fmtHM(b.start)}–${fmtHM(b.end)}${b.pickup && b.pickup.n ? ' · ' + esc(b.pickup.n) : ''}</div>` : ''}
+          <div class="b-t">${b.status === 'on_journey' ? '🚗 ' : ''}${title}${b.pickupVerifiedAt ? ' <span style="color:var(--lime)">✓</span>' : ''}</div>
+          ${h >= 46 ? `<div class="b-s">${b.status === 'on_journey' ? 'ON JOURNEY · ' : ''}${fmtHM(b.start)}–${fmtHM(b.end)}${b.pickup && b.pickup.n ? ' · ' + esc(b.pickup.n) : ''}</div>` : ''}
           ${holds.length && h >= 60 ? `<div class="b-sync">${dots}${failed ? `<span style="color:var(--err);font-weight:800;margin-left:2px">!</span>` : ''}${!failed && !syncing ? `<span style="color:var(--muted2);margin-left:2px;font-size:9.5px">${blockedN}×</span>` : ''}</div>` : ''}
         </div>`;
       }
@@ -462,7 +573,7 @@ function openBlockModal(id) {
   const c = ch(b.channelId);
   const d = drv(b.driverId);
   const holds = Object.entries(b.holds || {});
-  const statusPill = { confirmed: 'ok', 'in-progress': 'info', completed: 'mut', cancelled: 'err' }[b.status];
+  const statusPill = { confirmed: 'ok', 'in-progress': 'info', on_journey: 'warn', completed: 'mut', cancelled: 'err' }[b.status];
   const holdRow = ([cid, hd]) => {
     const cc = ch(cid);
     const icon = hd.state === 'blocked' ? '<span style="color:var(--ok)">✓ blocked</span>'
@@ -472,7 +583,7 @@ function openBlockModal(id) {
     const retry = hd.state === 'failed' ? `<button class="btn sm" onclick="retryHold('${b.id}','${cid}')">Retry</button>` : '';
     return `<div class="hold-row"><span class="nm"><span class="cdot" style="width:9px;height:9px;border-radius:50%;background:${cc.color}"></span>${esc(cc.name)}</span>${icon}${retry}</div>`;
   };
-  const canVerify = b.code && !b.pickupVerifiedAt && (b.status === 'confirmed' || b.status === 'in-progress');
+  const canVerify = b.code && !b.pickupVerifiedAt && (b.status === 'confirmed' || b.status === 'in-progress' || b.status === 'on_journey');
   const codeSection = b.code ? `
     <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:16px 0 6px">Secret pickup code</h3>
     <div class="code-display">${b.code.split('').map((n) => `<span class="code-digit">${n}</span>`).join('')}</div>
@@ -509,6 +620,15 @@ function openBlockModal(id) {
     <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:16px 0 10px">Availability pushed to other apps</h3>
     ${holds.length ? holds.map(holdRow).join('') : '<div class="muted" style="font-size:13px">No other channels connected — nothing to sync.</div>'}
     <div class="m-actions">
+      ${(() => {
+        const mine = S.me && S.me.driverId && b.driverId === S.me.driverId;
+        const busy = myDriver() && myDriver().status === 'on_journey';
+        if (b.kind === 'booking' && mine && (b.status === 'confirmed' || b.status === 'in-progress') && !busy) {
+          return `<button class="btn journey" onclick="startJourney('${b.id}')">▶ Start journey — navigate to pickup</button>`;
+        }
+        if (b.status === 'on_journey') return `<div class="journey-flag">🚗 ON JOURNEY — the app is locked for safety. Use the journey screen to complete the job.</div>`;
+        return '';
+      })()}
       ${(b.status === 'confirmed' || b.status === 'in-progress') ? `<button class="btn danger" onclick="cancelBlock('${b.id}')">${b.kind === 'manual' ? 'Remove block' : 'Cancel job'} & release slot</button>` : ''}
       <button class="btn" onclick="closeModal()">Close</button>
     </div>`);
@@ -562,10 +682,11 @@ function renderRequests() {
         <select class="mini" onchange="assignReq('${r.id}', this.value)">
           ${r.driverId ? '' : '<option value="" selected disabled>Assign a driver…</option>'}
           ${S.state.drivers.map((d) => {
-            const off = d.status !== 'online';
+            const off = d.status === 'offline';
+            const onJ = d.status === 'on_journey';
             const linked = !!(d.connections && d.connections[r.channelId]);
             const clash = !off && linked && driverClashLocal(d.id, r.pickupAt, endTs);
-            return `<option value="${d.id}" ${r.driverId === d.id ? 'selected' : ''} ${off || !linked || clash ? 'disabled' : ''}>${esc(d.name)}${off ? ' (off duty)' : !linked ? ` (not linked on ${esc(c.name)})` : clash ? ' (clashes ' + fmtHM(clash.start) + ')' : ''}</option>`;
+            return `<option value="${d.id}" ${r.driverId === d.id ? 'selected' : ''} ${off || !linked || clash ? 'disabled' : ''}>${esc(d.name)}${off ? ' (off duty)' : onJ ? ' (🚗 on journey)' : !linked ? ` (not linked on ${esc(c.name)})` : clash ? ' (clashes ' + fmtHM(clash.start) + ')' : ''}</option>`;
           }).join('')}
         </select>
         ${r.driverId ? `<span class="avatar" style="background:${drvColor(r.driverId)};width:22px;height:22px;font-size:9px">${drvInit(r.driverId)}</span>` : '<span class="pill warn">no free driver</span>'}
@@ -651,10 +772,11 @@ function renderMap() {
   const homes = S.state.drivers.map((d) => {
     if (!d.home) return '';
     const [x, y] = proj(d.home.lat, d.home.lng);
+    const col = d.status === 'online' ? d.color : d.status === 'on_journey' ? '#FBBF24' : '#3D5478';
     return `<g>
-      <rect x="${x - 7}" y="${y - 14}" width="14" height="19" rx="4" fill="${d.status === 'online' ? d.color : '#3D5478'}" stroke="#0A0F1A" stroke-width="1.5"/>
+      <rect x="${x - 7}" y="${y - 14}" width="14" height="19" rx="4" fill="${col}" stroke="#0A0F1A" stroke-width="1.5"/>
       <text x="${x}" y="${y}" text-anchor="middle" font-size="8.5" font-weight="800" fill="#06101C">${esc(drvInit(d.id))}</text>
-      <title>${esc(d.name)} — based in ${esc(d.home.name)} (${d.status})</title>
+      <title>${esc(d.name)} — based in ${esc(d.home.name)} (${d.status === 'on_journey' ? '🚗 on journey' : d.status})</title>
     </g>`;
   }).join('');
   const sideJob = (b) => `<div class="map-job" onclick="openBlockModal('${b.id}')">
@@ -672,7 +794,7 @@ function renderMap() {
   <div class="map-layout" style="margin-top:14px">
     <div>
       <div class="panel" style="margin-bottom:16px"><h3>Fleet status</h3>
-        ${S.state.drivers.map((d) => `<div class="mini-stat"><span><span class="cdot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${d.status === 'online' ? d.color : '#3D5478'};margin-right:7px"></span>${esc(d.name)}</span><b class="${d.status === 'online' ? '' : 'muted'}">${d.status}</b></div>`).join('')}
+        ${S.state.drivers.map((d) => `<div class="mini-stat"><span><span class="cdot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${d.status === 'online' ? d.color : d.status === 'on_journey' ? '#FBBF24' : '#3D5478'};margin-right:7px"></span>${esc(d.name)}</span><b class="${d.status === 'online' ? '' : 'muted'}">${d.status === 'on_journey' ? '🚗 on journey' : d.status}</b></div>`).join('')}
       </div>
       <div class="panel"><h3>On the map (${upcoming.length})</h3>
         ${upcoming.length ? upcoming.sort((a, b) => new Date(a.start) - new Date(b.start)).slice(0, 9).map(sideJob).join('') : '<div class="muted" style="font-size:13px;padding:6px 0">No geocoded jobs upcoming. Direct bookings typed in free text may not appear here.</div>'}
@@ -908,7 +1030,7 @@ function renderFleet() {
             return conn ? `<i style="background:${c2.color}" title="${esc(c2.name)}: ${esc(conn.ref)}"></i>` : '';
           }).join('') || '<span class="muted" style="font-size:10.5px">no apps linked — add driver numbers in Settings</span>'}</div>
         </div>
-        <span class="pill ${d.status === 'online' ? 'ok' : 'mut'}">${d.status === 'online' ? 'online' : 'off duty'}</span>
+        <span class="pill ${d.status === 'online' ? 'ok' : d.status === 'on_journey' ? 'warn' : 'mut'}">${d.status === 'online' ? 'online' : d.status === 'on_journey' ? '🚗 on journey' : 'off duty'}</span>
       </div>
       <div class="dr-stats">
         <div><div class="v">${doneToday.length}</div><div class="k">trips today</div></div>
@@ -919,7 +1041,9 @@ function renderFleet() {
       <div class="dr-next">${next ? `Next: <b style="color:var(--text)">${timeLabel(next.start)}</b> — ${esc(next.rider || 'Booking')}${next.pickup ? ' · ' + esc(next.pickup.n) : ''}${next.code ? ` · code <b>${next.code}</b>` : ''}` : 'No upcoming bookings.'}</div>
       <div class="dr-foot">
         <button class="btn sm" onclick="openDriverModal('${d.id}')">Edit profile</button>
-        <button class="btn sm ${d.status === 'online' ? 'danger ghost' : 'primary'}" onclick="toggleDriver('${d.id}')">${d.status === 'online' ? 'Take off duty' : 'Bring online'}</button>
+        ${d.status === 'on_journey'
+          ? `<button class="btn sm" disabled title="Finish the journey from the journey screen first">🚗 driving…</button>`
+          : `<button class="btn sm ${d.status === 'online' ? 'danger ghost' : 'primary'}" onclick="toggleDriver('${d.id}')">${d.status === 'online' ? 'Take off duty' : 'Bring online'}</button>`}
       </div>
     </div>`;
   };
@@ -1174,7 +1298,7 @@ function renderSettings() {
         <div class="tab-note" style="margin-bottom:12px">Each company issues its drivers a unique number. Enter it here so ${selD ? esc(selD.name.split(' ')[0]) : 'the driver'} can receive that app's jobs — FareFlow only routes an app's offers to drivers linked on it.</div>
         <div class="form-row"><label>Driver</label>
           <select class="input" onchange="setConnDriver(this.value)">
-            ${S.state.drivers.map((d) => `<option value="${d.id}" ${S.connDriver === d.id ? 'selected' : ''}>${esc(d.name)}${d.status !== 'online' ? ' (off duty)' : ''}</option>`).join('')}
+            ${S.state.drivers.map((d) => `<option value="${d.id}" ${S.connDriver === d.id ? 'selected' : ''}>${esc(d.name)}${d.status === 'on_journey' ? ' (🚗 on journey)' : d.status !== 'online' ? ' (off duty)' : ''}</option>`).join('')}
           </select>
         </div>
         <div class="conn-summary">${Object.values(S.state.channels).filter((c2) => c2.id !== 'direct').map((c2) => {
@@ -1343,7 +1467,7 @@ function defaultDate(offsetDays = 0) { const d = new Date(); d.setDate(d.getDate
 function nextHour() { const d = new Date(nowMs() + 3600000); return `${String(d.getHours()).padStart(2, '0')}:00`; }
 function driverOptions(includeAll) {
   return `${includeAll ? '<option value="all">🌐 Whole fleet</option>' : ''}` +
-    S.state.drivers.map((d) => `<option value="${d.id}" ${d.status !== 'online' && !includeAll ? '' : ''}>${esc(d.name)}${d.status !== 'online' ? ' (off duty)' : ''}</option>`).join('');
+    S.state.drivers.map((d) => `<option value="${d.id}" ${d.status !== 'online' && d.status !== 'on_journey' && !includeAll ? '' : ''}>${esc(d.name)}${d.status === 'on_journey' ? ' (🚗 on journey)' : d.status !== 'online' ? ' (off duty)' : ''}</option>`).join('');
 }
 function openDirectModal() {
   openModal(`
@@ -1591,6 +1715,7 @@ const FAQ_ITEMS = [
   ['How do I install it on my phone?', 'iPhone: open the app link in <b>Safari → Share → Add to Home Screen</b>. Android: open in <b>Chrome → ⋮ → Install app</b>. It then runs fullscreen like a native app. See the How-to guides for pictures-in-words.'],
   ['How do I sign in?', 'With your <b>email or mobile number</b> plus your password — either works on the same account. New here? Tap <b>Create an account</b> on the sign-in screen and your driver profile is set up automatically.'],
   ['How does FareFlow know which app jobs are mine?', 'Every company gives you a driver number (Uber ID, Bolt ID…). Link each app in <b>Settings → App connections</b> using that number, and the router only sends that app’s work to drivers linked on it.'],
+  ['What is journey mode? (the 🚗 driving lock)', 'Open your booking and tap <b>▶ Start journey</b> — Google Maps opens to the pickup and FareFlow locks everything else so you can’t fiddle with the app while driving. You get a live journey clock, big tap-target navigation buttons, and only ONE thing can interrupt you: new job offers, with a 20-second countdown that declines itself if ignored. Tap <b>✓ Rider on board</b> when they get in to switch navigation to the drop-off, then <b>🏁 Complete job</b> on arrival — you’re instantly back online for the next job.'],
   ['Why did my job decline itself?', 'Two possibilities: the offer expired (offers live 40–80 seconds, like the real apps), or a clashing booking existed — clashing offers are politely declined to protect your acceptance rating.'],
   ['What is the 4-digit pickup code?', 'Every booking gets a code. The rider sees it in their confirmation text and tracking page; they show it at the door, you tap <b>Verify pickup</b> in the booking — proving identity on both sides and stopping wrong-car pickups.'],
   ['Do riders need to install anything?', 'Never. They get a text with a tracking link that opens in any browser: live ETA, your vehicle and reg, and their pickup code in big digits.'],
@@ -1610,6 +1735,7 @@ const HOWTO_GUIDES = [
   ['Install the app (iPhone & Android)', ['Open your FareFlow link in Safari (iPhone) or Chrome (Android).', 'iPhone: tap Share → scroll → “Add to Home Screen” → Add. Android: tap ⋮ → “Install app”.', 'Launch from the new home-screen icon — it runs fullscreen and self-updates.', 'Tap the 🔔 in the top bar once so bookings alert you even in the background.']],
   ['Connect your apps with driver numbers', ['Open Settings → App connections.', 'Pick a driver, choose the app (Uber, Bolt…), and enter the driver number that company issued you.', 'Save — the router now sends that app’s offers only to linked drivers.', 'Unlink anytime with the same panel.']],
   ['Handle an incoming job offer', ['When a job lands, a centre-screen card pops up with fare, route, time and a live expiry bar.', 'Tap ✓ Accept — the slot blocks on every other app instantly — or ✕ Decline.', 'Watch for the confirmation popup with the rider’s 4-digit pickup code.']],
+  ['Drive a job with journey mode', ['Open the booking from your Diary and tap ▶ Start journey — navigation opens to the pickup.', 'The app safety-locks: everything is frozen except the journey screen and 20-second job offers you can still stack for later.', 'At the pickup, ask the rider’s 4-digit code, then tap ✓ Rider on board — navigation switches to the drop-off.', 'On arrival tap 🏁 Complete job — you’re instantly back online. Something went wrong? “End journey early” returns the job to the diary.']],
   ['Verify a rider at pickup', ['Ask the rider for their 4-digit code (in their SMS and tracking page).', 'Open the booking in the Diary → tap “Verify pickup” → enter the code.', 'The booking stamps ✓ verified — proof for both of you.']],
   ['Take a direct phone booking', ['Diary → ＋ Direct booking.', 'Enter rider, phone number, route, date/time, fare.', 'We text the rider their confirmation, tracking link and pickup code automatically — and block the apps.']],
   ['Use the demand heatmap', ['Open Demand from the tabs.', 'Each row is a channel, each column an hour — brighter = busier.', 'Plan your shifts around Friday 21:00–02:00 and airport rushes; quiet cells are good break windows.']],

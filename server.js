@@ -172,6 +172,10 @@ function load() {
 }
 const driverById = (id) => state.drivers.find((d) => d.id === id);
 const onlineDrivers = () => state.drivers.filter((d) => d.status === 'online');
+/* drivers actively working (online or mid-journey) — on-journey drivers can stack later-slot jobs */
+const activeDrivers = () => state.drivers.filter((d) => d.status === 'online' || d.status === 'on_journey');
+/* release a driver from journey mode: back to accepting jobs */
+const endJourney = (d) => { d.status = 'online'; d.journeyBlockId = null; };
 const driverLinked = (d, channelId) => channelId === 'direct' || !!(d.connections && d.connections[channelId]);
 function publicState() {
   const clone = JSON.parse(JSON.stringify(state));
@@ -294,14 +298,14 @@ const msgTemplates = {
 function blocksForDriver(driverId) {
   return Object.values(state.blocks).filter((b) =>
     (b.driverId === driverId || b.driverId === 'all') &&
-    (b.status === 'confirmed' || b.status === 'in-progress'));
+    (b.status === 'confirmed' || b.status === 'in-progress' || b.status === 'on_journey'));
 }
 function driverClash(driverId, start, end) {
   return blocksForDriver(driverId).find((b) => overlaps(start, end, b.start, b.end));
 }
 function routeToDriver(start, end, channelId) {
-  /* only online drivers LINKED on this app (via their operator driver number) can take its jobs */
-  const candidates = onlineDrivers().filter((d) => driverLinked(d, channelId) && !driverClash(d.id, start, end));
+  /* only WORKING drivers (online or on a journey) LINKED on this app (via their operator driver number) can take its jobs */
+  const candidates = activeDrivers().filter((d) => driverLinked(d, channelId) && !driverClash(d.id, start, end));
   if (!candidates.length) return null;
   const today = now().toDateString();
   const score = (d) => Object.values(state.blocks).filter((b) =>
@@ -450,7 +454,7 @@ function createRequest(o) {
   const driver = routeToDriver(pickupAt, windowEnd, o.channelId);
   const via = req.source === 'api' ? ' [API]' : '';
   if (!driver) {
-    const linkedN = onlineDrivers().filter((d) => driverLinked(d, o.channelId)).length;
+    const linkedN = activeDrivers().filter((d) => driverLinked(d, o.channelId)).length;
     if (state.settings.autoDeclineOverlap) {
       req.status = 'auto-declined';
       log('warn', `Auto-declined ${chCat.name}${via} (${fmtTime(req.pickupAt)}) — ${linkedN === 0 ? 'no online driver linked on this app' : 'no driver free in that slot'}`);
@@ -459,7 +463,8 @@ function createRequest(o) {
     }
   } else {
     req.driverId = driver.id;
-    log('info', `${chCat.name}${via} → ${driver.name.split(' ')[0]}: ${req.rider}, £${req.fare.toFixed(2)} at ${fmtTime(req.pickupAt)}`);
+    if (driver.status === 'on_journey') req.expiresAt = iso(new Date(Date.now() + 20 * 1000)); // quick-fire: 20s to accept while driving
+    log('info', `${chCat.name}${via} → ${driver.name.split(' ')[0]}: ${req.rider}, £${req.fare.toFixed(2)} at ${fmtTime(req.pickupAt)}${driver.status === 'on_journey' ? ' — 20s quick-fire (driver is on a journey)' : ''}`);
   }
   state.requests[id] = req;
   state.requestOrder.unshift(id);
@@ -618,6 +623,12 @@ setInterval(() => {
     } else if ((b.status === 'confirmed' || b.status === 'in-progress') && new Date(b.end) <= t) {
       b.status = 'completed'; changed = true;
       if (b.fare) log('ok', `Trip completed — £${b.fare.toFixed(2)} from ${state.channels[b.channelId]?.name || 'manual'}`);
+    } else if (b.status === 'on_journey' && new Date(b.end) <= addMin(t, -45)) {
+      /* safety valve: driver never tapped Complete — auto-close the journey 45 min after the booked end */
+      b.status = 'completed'; changed = true;
+      const jd = driverById(b.driverId);
+      if (jd && jd.status === 'on_journey' && jd.journeyBlockId === b.id) endJourney(jd);
+      log('warn', `Journey auto-closed (job ran 45+ min over) — ${jd ? jd.name.split(' ')[0] : 'driver'} is back online. Tap “Complete job” at the drop-off next time.`);
     }
     // pickup reminder ~60 min ahead for direct bookings with a phone number
     if (b.kind === 'booking' && b.channelId === 'direct' && b.riderPhone && b.status === 'confirmed' && !b.reminderSent) {
@@ -976,7 +987,7 @@ const server = http.createServer(async (req, res) => {
         if (r.status !== 'pending') return send(res, 409, { error: 'request is no longer pending' });
         const d = driverById(body.driverId);
         if (!d) return send(res, 400, { error: 'unknown driver' });
-        if (d.status !== 'online') return send(res, 409, { error: d.name + ' is off duty' });
+        if (d.status !== 'online' && d.status !== 'on_journey') return send(res, 409, { error: d.name + ' is off duty' });
         if (!driverLinked(d, r.channelId)) return send(res, 409, { error: `${d.name.split(' ')[0]} isn't linked on ${state.channels[r.channelId].name} — add their driver number in Settings → App connections` });
         const end = addMin(new Date(r.pickupAt), r.durationMin + state.settings.bufferMin);
         const clash = driverClash(d.id, r.pickupAt, end);
@@ -1046,6 +1057,8 @@ const server = http.createServer(async (req, res) => {
         } else {
           b.status = 'cancelled';
           releaseHolds(b);
+          const bd = driverById(b.driverId);
+          if (bd && bd.status === 'on_journey' && bd.journeyBlockId === b.id) endJourney(bd);
           const req2 = b.bookingId && state.requests[b.bookingId];
           if (req2) req2.status = 'driver-cancelled';
           if (b.riderPhone) sendMessage({ blockId: b.id, to: b.riderPhone, body: msgTemplates.cancelled(b), type: b.msgType || 'sms', kind: 'cancelled' });
@@ -1072,6 +1085,49 @@ const server = http.createServer(async (req, res) => {
         broadcast('state'); save();
         return send(res, 200, { ok: true });
       }
+      /* ---- journey mode: start → rider aboard → complete. While live, the driver's app is safety-locked ---- */
+      m = p.match(/^\/api\/blocks\/([\w-]+)\/journey\/(start|leg|complete|abort)$/);
+      if (m) {
+        const b = state.blocks[m[1]];
+        const action = m[2];
+        if (!b) return send(res, 404, { error: 'not found' });
+        if (b.kind !== 'booking') return send(res, 400, { error: 'Only real bookings can become journeys' });
+        const d = driverById(b.driverId);
+        if (!d || b.driverId === 'all') return send(res, 409, { error: 'Assign this job to one driver first' });
+        const me2 = sessionUser(req);
+        if (me2 && me2.driverId && me2.driverId !== d.id) return send(res, 403, { error: `This job belongs to ${d.name.split(' ')[0]} — drivers run their own journeys` });
+        const first = d.name.split(' ')[0];
+        if (action === 'start') {
+          if (b.status !== 'confirmed' && b.status !== 'in-progress') return send(res, 409, { error: `This job is ${b.status.replace('_', ' ')} — it can’t be started` });
+          if (d.status === 'on_journey' && d.journeyBlockId && d.journeyBlockId !== b.id) return send(res, 409, { error: `${first} is already on a journey — complete it first` });
+          b.status = 'on_journey';
+          b.journey = { startedAt: iso(now()), leg: 'to_pickup', pickedUpAt: null };
+          d.status = 'on_journey'; d.journeyBlockId = b.id;
+          log('ok', `🚗 ${first} started the journey — heading to pickup (${placeName(b.pickup) || 'pickup'}). App locked for safety; new offers pop for 20s only.`);
+        } else if (action === 'leg') {
+          if (b.status !== 'on_journey') return send(res, 409, { error: 'No live journey on this job' });
+          b.journey = b.journey || { startedAt: iso(now()), leg: 'to_pickup' };
+          b.journey.leg = 'to_dropoff';
+          b.journey.pickedUpAt = b.journey.pickedUpAt || iso(now());
+          log('ok', `✓ ${b.rider || 'Rider'} is on board — ${first} is heading to the drop-off (${placeName(b.dropoff) || 'drop-off'})`);
+        } else if (action === 'complete') {
+          if (b.status !== 'on_journey') return send(res, 409, { error: 'No live journey on this job' });
+          b.status = 'completed';
+          b.completedAt = iso(now());
+          b.journey = { ...(b.journey || {}), completedAt: b.completedAt };
+          if (d.status === 'on_journey' && d.journeyBlockId === b.id) endJourney(d);
+          log('ok', `🏁 Journey complete — ${b.rider || 'rider'} dropped off${b.fare ? `, £${b.fare.toFixed(2)} banked` : ''}. ${first} is back ONLINE and taking jobs.`);
+        } else { /* abort: problem/no-show — job stays confirmed so it can be restarted or cancelled from the diary */
+          if (b.status !== 'on_journey') return send(res, 409, { error: 'No live journey on this job' });
+          b.status = 'confirmed';
+          b.journey = { ...(b.journey || {}), abortedAt: iso(now()) };
+          if (d.status === 'on_journey' && d.journeyBlockId === b.id) endJourney(d);
+          log('warn', `Journey ended early by ${first} — the ${fmtTime(b.start)} job is back to confirmed`);
+        }
+        broadcast('state'); save();
+        return send(res, 200, { ok: true, status: b.status, leg: b.journey && b.journey.leg });
+      }
+
       if (p === '/api/holds/retry') {
         const b = state.blocks[body.blockId];
         if (!b) return send(res, 404, { error: 'not found' });
@@ -1126,6 +1182,7 @@ const server = http.createServer(async (req, res) => {
       if (m) {
         const d = driverById(m[1]);
         if (!d) return send(res, 404, { error: 'not found' });
+        if (d.status === 'on_journey') return send(res, 409, { error: `${d.name.split(' ')[0]} is on a journey — complete it from the journey screen first` });
         d.status = d.status === 'online' ? 'offline' : 'online';
         log(d.status === 'online' ? 'ok' : 'warn', `${d.name} is now ${d.status === 'online' ? 'ONLINE and taking routed jobs' : 'off duty (keeps existing bookings)'}`);
         broadcast('state'); save();
