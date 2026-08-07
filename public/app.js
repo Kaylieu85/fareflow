@@ -1,5 +1,5 @@
 /* FareFlow client — fleet channel manager SPA ------------------------------------ */
-const S = { state: null, route: 'diary', weekOffset: 0, driverFilter: 'all', es: null, serverTimeOffset: 0, authed: false, me: null, connDriver: null };
+const S = { state: null, route: 'diary', weekOffset: 0, driverFilter: 'all', es: null, serverTimeOffset: 0, authed: false, me: null, connDriver: null, reqQueue: [] };
 const EXTRA_CH = { manual: { id: 'manual', name: 'Manual block', color: '#94A3B8' } };
 
 /* ------------------------------------------------------------------ helpers */
@@ -74,6 +74,10 @@ function refresh() {
       const { state, serverTime, me } = await api('/api/state');
       S.serverTimeOffset = new Date(serverTime) - Date.now();
       S.state = state; S.me = me;
+      // drop queued request popups that were answered elsewhere / expired
+      const before = S.reqQueue[0] && S.reqQueue[0].id;
+      S.reqQueue = S.reqQueue.filter((q) => { const live = state.requests[q.id]; return !live || live.status === 'pending'; });
+      if (before && !(S.reqQueue[0] && S.reqQueue[0].id === before)) { const root = document.getElementById('reqPopRoot'); if (root) root.dataset.open = ''; showNextReq(); }
       render();
     } catch (e) { if (!(e && e.auth)) setConn(false); }
   }, 120);
@@ -90,6 +94,7 @@ function setupSSE() {
     es.onerror = () => setConn(false);
     es.addEventListener('state', () => refresh());
     es.addEventListener('booking', (e) => { try { popBooking(JSON.parse(e.data)); } catch {} });
+    es.addEventListener('request', (e) => { try { queueRequest(JSON.parse(e.data)); } catch {} });
     es.addEventListener('log', (e) => {
       const entry = JSON.parse(e.data);
       if (['ok', 'warn', 'err'].includes(entry.level)) toast(entry.msg, entry.level);
@@ -179,6 +184,73 @@ function popBooking(b) {
   setTimeout(() => { if (el.isConnected) kill(); }, 14000);
 }
 
+/* ------------------------- incoming request modal (centre-screen respond) */
+function queueRequest(r) {
+  if (!S.state || !r || !r.id) return;
+  if (S.reqQueue.some((q) => q.id === r.id)) return;
+  const live = S.state.requests[r.id];
+  if (live && live.status !== 'pending') return;
+  r._ttlMs = Math.max(5000, new Date(r.expiresAt) - Date.now() + (S.serverTimeOffset || 0));
+  r._t0 = Date.now();
+  S.reqQueue.push(r);
+  chime(); setTimeout(chime, 450);
+  if (navigator.vibrate) try { navigator.vibrate([160, 60, 160, 60, 160]); } catch {}
+  toast(`📲 ${r.channel} request for ${r.driver} — tap to respond`, 'ok');
+  showNextReq();
+}
+function showNextReq() {
+  const root = document.getElementById('reqPopRoot');
+  if (!root) return;
+  const r = S.reqQueue[0];
+  if (!r) { root.innerHTML = ''; root.dataset.open = ''; return; }
+  if (root.dataset.open === r.id) return;
+  root.dataset.open = r.id;
+  const other = S.reqQueue.length - 1;
+  root.innerHTML = `<div class="rq-back">
+    <div class="rq-card" style="--rq:${r.color || '#38BDF8'}" role="alertdialog" aria-label="Incoming ${esc(r.channel)} request">
+      <div class="rq-top">
+        <span class="rq-pill">${esc(r.channel)}</span>
+        ${r.asap ? '<span class="rq-asap">🔥 ASAP pickup</span>' : ''}
+        <span class="rq-mini">${other ? `+${other} more waiting` : ''}</span><span class="rq-live">● LIVE</span>
+      </div>
+      <div class="rq-fare">£${(+r.fare || 0).toFixed(2)}</div>
+      <div class="rq-line"><b>${esc(r.rider)}</b> · offered to <b>${esc(r.driver)}</b></div>
+      <div class="rq-route"><div><i class="rq-dot a"></i>${esc(r.pickup)}</div><div><i class="rq-dot b"></i>${esc(r.dropoff)}</div></div>
+      <div class="rq-meta">${fmtDay(r.pickupAt)} · pickup ${fmtHM(r.pickupAt)} · ${r.distanceMi || '?'} mi · ~${r.durationMin || '?'} min${r.distanceMi && r.fare ? ` · £${(r.fare / r.distanceMi).toFixed(2)}/mi` : ''}</div>
+      <div class="rq-code">Pickup code for this job <b>${esc(String(r.code || '—'))}</b></div>
+      <div class="rq-btns">
+        <button class="rq-dec" onclick="respondReq('${r.id}', false)">✕ Decline</button>
+        <button class="rq-acc" onclick="respondReq('${r.id}', true)">✓ Accept · blocks all apps</button>
+      </div>
+      <div class="rq-ttl"><i></i></div>
+    </div>
+  </div>`;
+  tickTtl(r);
+}
+function tickTtl(r) {
+  const root = document.getElementById('reqPopRoot');
+  if (!root || !S.reqQueue[0] || S.reqQueue[0].id !== r.id) return;
+  const remain = Math.max(0, r._ttlMs - (Date.now() - r._t0));
+  const bar = root.querySelector('.rq-ttl i');
+  if (bar) bar.style.width = (remain / r._ttlMs * 100).toFixed(1) + '%';
+  if (remain <= 0) { dismissReq(r.id, true); return; }
+  setTimeout(() => tickTtl(r), 250);
+}
+function dismissReq(id, expired) {
+  const idx = S.reqQueue.findIndex((q) => q.id === id);
+  if (idx >= 0) S.reqQueue.splice(idx, 1);
+  const root = document.getElementById('reqPopRoot');
+  if (root) root.dataset.open = '';
+  if (expired) toast('That offer timed out', 'warn');
+  showNextReq();
+}
+async function respondReq(id, accept) {
+  dismissReq(id);
+  try { await api(`/api/requests/${id}/${accept ? 'accept' : 'decline'}`, 'POST'); }
+  catch (e) { toast(e.message, 'err'); }
+  refresh();
+}
+
 /* ----------------------------------------------------------------- modal */
 function openModal(html) {
   $('#modalRoot').innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()"><div class="modal" role="dialog">${html}</div></div>`;
@@ -199,7 +271,7 @@ function render() {
   mb.className = 'master ' + (online ? 'online-state' : 'offline-state');
   const uc = document.getElementById('userChip');
   if (uc) uc.innerHTML = S.me
-    ? `<span class="user-chip" onclick="location.hash='#/settings'" title="${esc(S.me.email || '')}${S.me.phone ? ' · ' + esc(S.me.phone) : ''}">
+    ? `<span class="user-chip" onclick="openProfile()" title="Your profile — FAQ, how-to, support">
          <span class="avatar" style="width:26px;height:26px;font-size:10px;background:${S.me.driverId ? drvColor(S.me.driverId) : '#38BDF8'}">${esc(S.me.name.split(' ').map((w) => w[0]).slice(0, 2).join(''))}</span>
          <span class="uc-name">${esc(S.me.name.split(' ')[0])}</span>
        </span>
@@ -215,6 +287,9 @@ function render() {
   else if (S.route === 'earnings') view.innerHTML = renderEarnings();
   else if (S.route === 'api') view.innerHTML = renderApi();
   else if (S.route === 'settings') view.innerHTML = renderSettings();
+  else if (S.route === 'faq') view.innerHTML = renderFaq();
+  else if (S.route === 'howto') view.innerHTML = renderHowto();
+  else if (S.route === 'support') view.innerHTML = renderSupport();
   positionNowLine();
 }
 function driverFilterChips() {
@@ -230,41 +305,80 @@ function filterBlocks(list) {
 }
 
 /* ----------------------------------------------------------------- diary */
+/* split overlapping items into side-by-side columns (interval-graph coloring) */
+function laneLayout(items) {
+  const clusters = []; let cur = [], curEnd = null;
+  const flush = () => { if (cur.length) clusters.push(cur); cur = []; curEnd = null; };
+  for (const b of items) {
+    const s = new Date(b.start), e = new Date(b.end);
+    if (curEnd && s < curEnd) { cur.push([b, s, e]); if (e > curEnd) curEnd = e; }
+    else { flush(); cur.push([b, s, e]); curEnd = e; }
+  }
+  flush();
+  const out = [];
+  for (const cl of clusters) {
+    const colsArr = [];
+    const placed = [];
+    for (const [b, s, e] of cl) {
+      let cIdx = -1;
+      for (let i = 0; i < colsArr.length; i++) { if (s >= colsArr[i]) { cIdx = i; colsArr[i] = e; break; } }
+      if (cIdx < 0) { colsArr.push(e); cIdx = colsArr.length - 1; }
+      placed.push({ b, col: cIdx, cols: colsArr.length });
+    }
+    for (const o of placed) o.cols = colsArr.length;
+    out.push(...placed);
+  }
+  return out;
+}
 function renderDiary() {
   const ws = startOfWeek(S.weekOffset);
   const days = [...Array(7)].map((_, i) => { const d = new Date(ws); d.setDate(d.getDate() + i); return d; });
   const todayStr = new Date().toDateString();
   const dayEnd = (d) => { const e = new Date(d); e.setDate(e.getDate() + 1); return e; };
 
+  /* lanes: every driver gets their own mini-column per day so bookings never cross */
+  const allFiltered = filterBlocks(blocks());
+  let lanes;
+  if (S.driverFilter === 'all') {
+    lanes = S.state.drivers
+      .filter((d) => d.status === 'online' || allFiltered.some((b) => b.driverId === d.id))
+      .map((d) => d.id);
+    if (!lanes.length) lanes = S.state.drivers.map((d) => d.id);
+    if (allFiltered.some((b) => b.driverId === 'all')) lanes = ['all', ...lanes];
+  } else lanes = [S.driverFilter];
+  const laneW = 100 / lanes.length;
+
   const cols = days.map((day) => {
-    const list = filterBlocks(blocks())
+    const list = allFiltered
       .filter((b) => new Date(b.start) < dayEnd(day) && new Date(b.end) > day)
       .sort((a, b) => new Date(a.start) - new Date(b.start));
-    let html = '', prevEnd = null;
-    for (const b of list) {
-      const c = ch(b.channelId);
-      const top = yOf(new Date(b.start) < day ? day : b.start);
-      const bottom = Math.min(DAY_SPAN / 60 * HOUR_PX, yOf(new Date(b.end) > dayEnd(day) ? dayEnd(day) : b.end) || DAY_SPAN / 60 * HOUR_PX);
-      const h = Math.max(24, bottom - top - 2);
-      const overlapCls = prevEnd && new Date(b.start) < prevEnd ? ' off' : '';
-      if (prevEnd && new Date(b.start) < prevEnd) { if (new Date(b.end) > prevEnd) prevEnd = new Date(b.end); } else prevEnd = new Date(b.end);
-      const holds = Object.entries(b.holds || {});
-      const syncing = holds.filter(([, hd]) => hd.state === 'syncing').length;
-      const failed = holds.filter(([, hd]) => hd.state === 'failed').length;
-      const blockedN = holds.filter(([, hd]) => hd.state === 'blocked').length;
-      const dots = holds.slice(0, 6).map(([, hd]) => `<i class="${hd.state}"></i>`).join('');
-      const title = b.kind === 'manual' ? esc(b.rider) : `${esc(c.name)} · ${esc(b.rider || '')}`;
-      const sub = b.kind === 'manual' ? `${fmtHM(b.start)}–${fmtHM(b.end)}` : `${fmtHM(b.start)}–${fmtHM(b.end)} · ${b.pickup ? esc(b.pickup.n) : ''}`;
-      const drvDot = (S.driverFilter === 'all' && b.kind !== 'manual') || b.driverId === 'all'
-        ? `<span class="b-drv" style="background:${b.driverId === 'all' ? '#CBD5E1' : drvColor(b.driverId)}" title="${esc(drvName(b.driverId))}">${b.driverId === 'all' ? '🌐' : drvInit(b.driverId)}</span>` : '';
-      html += `<div class="blk ${b.kind} ${b.status}${overlapCls}${b.driverId === 'all' ? ' fleet-block' : ''}" style="top:${top}px;height:${h}px;border-left-color:${c.color}"
-        onclick="openBlockModal('${b.id}')">
-        <div class="b-t">${title}${b.pickupVerifiedAt ? ' <span style="color:var(--lime)">✓</span>' : ''}</div>
-        <div class="b-s">${sub}</div>
-        ${holds.length ? `<div class="b-sync">${dots}${failed ? `<span style="color:var(--err);font-weight:800;margin-left:2px">!</span>` : ''}${!failed && !syncing ? `<span style="color:var(--muted2);margin-left:2px;font-size:9.5px">${blockedN}×</span>` : ''}</div>` : ''}
-        ${drvDot}
-      </div>`;
+    let html = '';
+    if (lanes.length > 1) {
+      for (let li = 1; li < lanes.length; li++) html += `<div class="lane-sep" style="left:${li * laneW}%"></div>`;
+      html += lanes.map((id, li) => `<div class="lane-tag" style="left:${li * laneW}%;width:${laneW}%;color:${id === 'all' ? '#CBD5E1' : drvColor(id)}">${id === 'all' ? '🌐' : esc(drvInit(id))}</div>`).join('');
     }
+    lanes.forEach((laneId, li) => {
+      const items = list.filter((b) => b.driverId === laneId);
+      for (const { b, col, cols: nCols } of laneLayout(items)) {
+        const c = ch(b.channelId);
+        const top = yOf(new Date(b.start) < day ? day : b.start);
+        const bottom = Math.min(DAY_SPAN / 60 * HOUR_PX, yOf(new Date(b.end) > dayEnd(day) ? dayEnd(day) : b.end) || DAY_SPAN / 60 * HOUR_PX);
+        const h = Math.max(26, bottom - top - 3);
+        const holds = Object.entries(b.holds || {});
+        const syncing = holds.filter(([, hd]) => hd.state === 'syncing').length;
+        const failed = holds.filter(([, hd]) => hd.state === 'failed').length;
+        const blockedN = holds.filter(([, hd]) => hd.state === 'blocked').length;
+        const dots = holds.slice(0, 5).map(([, hd]) => `<i class="${hd.state}"></i>`).join('');
+        const title = b.kind === 'manual' ? esc(b.rider) : `${esc(c.name)} · ${esc(b.rider || '')}`;
+        const w = laneW / nCols;
+        html += `<div class="blk ${b.kind} ${b.status}${b.driverId === 'all' ? ' fleet-block' : ''}" style="top:${top}px;height:${h}px;left:${li * laneW + col * w}%;width:calc(${w}% - 3px);border-left-color:${c.color}"
+          onclick="openBlockModal('${b.id}')" title="${esc(`${title} — ${fmtHM(b.start)}–${fmtHM(b.end)}`)}">
+          <div class="b-t">${title}${b.pickupVerifiedAt ? ' <span style="color:var(--lime)">✓</span>' : ''}</div>
+          ${h >= 46 ? `<div class="b-s">${fmtHM(b.start)}–${fmtHM(b.end)}${b.pickup && b.pickup.n ? ' · ' + esc(b.pickup.n) : ''}</div>` : ''}
+          ${holds.length && h >= 60 ? `<div class="b-sync">${dots}${failed ? `<span style="color:var(--err);font-weight:800;margin-left:2px">!</span>` : ''}${!failed && !syncing ? `<span style="color:var(--muted2);margin-left:2px;font-size:9.5px">${blockedN}×</span>` : ''}</div>` : ''}
+        </div>`;
+      }
+    });
     return html;
   });
 
@@ -1323,7 +1437,7 @@ setInterval(() => {
 /* ----------------------------------------------------------------- boot */
 function setRoute() {
   const r = (location.hash.replace('#/', '') || 'diary').split('?')[0];
-  S.route = ['diary', 'requests', 'map', 'demand', 'fleet', 'channels', 'messages', 'earnings', 'api', 'settings'].includes(r) ? r : 'diary';
+  S.route = ['diary', 'requests', 'map', 'demand', 'fleet', 'channels', 'messages', 'earnings', 'api', 'settings', 'faq', 'howto', 'support'].includes(r) ? r : 'diary';
   render();
 }
 function startAuthed() {
@@ -1331,7 +1445,14 @@ function startAuthed() {
   document.body.classList.remove('auth-mode');
   if (!S.es) setupSSE();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.register('/sw.js')
+      .then((r) => r && r.update && r.update())
+      .catch(() => {});
+    // self-heal stale caches: when a new SW takes over, reload once to get fresh code
+    if (!S.swReloadHooked) {
+      S.swReloadHooked = true;
+      navigator.serviceWorker.addEventListener('controllerchange', () => location.reload());
+    }
   }
   setRoute();
 }
@@ -1440,6 +1561,143 @@ async function doRegister(e) {
 async function logout() {
   try { await api('/api/auth/logout', 'POST'); } catch (e) {}
   location.reload();
+}
+
+/* ------------------------------------------------------ profile & help hub */
+function openProfile() {
+  if (!S.me) return;
+  const drv = S.me.driverId ? (S.state.drivers || []).find((d) => d.id === S.me.driverId) : null;
+  openModal(`
+    <div class="prof-head">
+      <span class="avatar" style="width:46px;height:46px;font-size:16px;background:${drv ? drv.color : '#38BDF8'}">${esc(S.me.name.split(' ').map((w) => w[0]).slice(0, 2).join(''))}</span>
+      <div>
+        <div style="font-weight:900;font-size:16px">${esc(S.me.name)}</div>
+        <div class="muted" style="font-size:12.5px">${esc(S.me.email || '')}${S.me.phone ? ' · ' + esc(S.me.phone) : ''}</div>
+        ${drv ? `<div class="muted" style="font-size:12px">🚗 ${esc(drv.vehicle)}${drv.reg ? ' · ' + esc(drv.reg) : ''}${drv.pco ? ' · PCO ' + esc(drv.pco) : ''}</div>` : '<div class="muted" style="font-size:12px">👔 Fleet owner account</div>'}
+      </div>
+    </div>
+    <div class="prof-menu">
+      <button onclick="closeModal();location.hash='#/faq'">📘 <b>FAQ</b><span>Answers to the questions drivers ask most</span></button>
+      <button onclick="closeModal();location.hash='#/howto'">🧭 <b>How-to guides</b><span>Install, connect apps, accept, verify & more</span></button>
+      <button onclick="closeModal();location.hash='#/support'">🆘 <b>Help & support</b><span>Chat, phone, email or open a ticket</span></button>
+      <button onclick="closeModal();location.hash='#/settings'">⚙️ <b>Settings</b><span>Auto-accept, buffer, app connections, calendar</span></button>
+      <button onclick="closeModal();requestNotify()">🔔 <b>Booking alerts</b><span>System notifications on this device</span></button>
+      <button class="danger" onclick="closeModal();logout()">⏻ <b>Sign out</b><span>End this session</span></button>
+    </div>`);
+}
+
+const FAQ_ITEMS = [
+  ['What exactly is FareFlow?', 'A channel manager for drivers — the same idea as hotel tools that stop double bookings across Booking.com and Expedia. Every job offer from every app lands in one inbox; accept once and that slot (plus your buffer) is blocked everywhere else automatically.'],
+  ['How do I install it on my phone?', 'iPhone: open the app link in <b>Safari → Share → Add to Home Screen</b>. Android: open in <b>Chrome → ⋮ → Install app</b>. It then runs fullscreen like a native app. See the How-to guides for pictures-in-words.'],
+  ['How do I sign in?', 'With your <b>email or mobile number</b> plus your password — either works on the same account. New here? Tap <b>Create an account</b> on the sign-in screen and your driver profile is set up automatically.'],
+  ['How does FareFlow know which app jobs are mine?', 'Every company gives you a driver number (Uber ID, Bolt ID…). Link each app in <b>Settings → App connections</b> using that number, and the router only sends that app’s work to drivers linked on it.'],
+  ['Why did my job decline itself?', 'Two possibilities: the offer expired (offers live 40–80 seconds, like the real apps), or a clashing booking existed — clashing offers are politely declined to protect your acceptance rating.'],
+  ['What is the 4-digit pickup code?', 'Every booking gets a code. The rider sees it in their confirmation text and tracking page; they show it at the door, you tap <b>Verify pickup</b> in the booking — proving identity on both sides and stopping wrong-car pickups.'],
+  ['Do riders need to install anything?', 'Never. They get a text with a tracking link that opens in any browser: live ETA, your vehicle and reg, and their pickup code in big digits.'],
+  ['What does the demand heatmap show?', 'Hour-by-hour demand per channel across the week — your own booking history blended with typical city rhythms. Park yourself where the ▓bright white▓ hours are.'],
+  ['How do I put my diary in Google/Apple Calendar?', 'Diary → <b>⇅ Calendar feed</b> → copy your URL and subscribe from your calendar app. You can also import an .ics file the other way — school runs and MOTs then block every app automatically.'],
+  ['Why do I occasionally see "Waking FareFlow up"?', 'This demo runs on free hosting that naps after ~15 quiet minutes — the first visit takes up to a minute to wake it, and the app retries automatically. On paid hosting it never happens.'],
+  ['Can my dispatch office push jobs straight in?', 'Yes — each channel has an authenticated API (Channels → API in the app): push offers, cancel them, read blocks. Operator and micro-cab systems integrate there.'],
+  ['Is FareFlow made by Uber or Bolt?', 'No — independent software that sits alongside the apps, like Eviivo sits alongside Booking.com. Not affiliated with or endorsed by any operator named in the app.'],
+];
+function renderFaq() {
+  return `<div class="page-head"><div><h1 class="page-title">FAQ</h1>
+    <div class="page-desc">The questions drivers ask most. Still stuck? <a href="#/support" style="color:var(--accent)">Talk to support →</a></div></div></div>
+    <div class="faq-list">${FAQ_ITEMS.map(([q, a], i) => `<details class="faq-item" ${i === 0 ? 'open' : ''}><summary>${esc(q)}</summary><div class="ans">${a}</div></details>`).join('')}</div>`;
+}
+
+const HOWTO_GUIDES = [
+  ['Install the app (iPhone & Android)', ['Open your FareFlow link in Safari (iPhone) or Chrome (Android).', 'iPhone: tap Share → scroll → “Add to Home Screen” → Add. Android: tap ⋮ → “Install app”.', 'Launch from the new home-screen icon — it runs fullscreen and self-updates.', 'Tap the 🔔 in the top bar once so bookings alert you even in the background.']],
+  ['Connect your apps with driver numbers', ['Open Settings → App connections.', 'Pick a driver, choose the app (Uber, Bolt…), and enter the driver number that company issued you.', 'Save — the router now sends that app’s offers only to linked drivers.', 'Unlink anytime with the same panel.']],
+  ['Handle an incoming job offer', ['When a job lands, a centre-screen card pops up with fare, route, time and a live expiry bar.', 'Tap ✓ Accept — the slot blocks on every other app instantly — or ✕ Decline.', 'Watch for the confirmation popup with the rider’s 4-digit pickup code.']],
+  ['Verify a rider at pickup', ['Ask the rider for their 4-digit code (in their SMS and tracking page).', 'Open the booking in the Diary → tap “Verify pickup” → enter the code.', 'The booking stamps ✓ verified — proof for both of you.']],
+  ['Take a direct phone booking', ['Diary → ＋ Direct booking.', 'Enter rider, phone number, route, date/time, fare.', 'We text the rider their confirmation, tracking link and pickup code automatically — and block the apps.']],
+  ['Use the demand heatmap', ['Open Demand from the tabs.', 'Each row is a channel, each column an hour — brighter = busier.', 'Plan your shifts around Friday 21:00–02:00 and airport rushes; quiet cells are good break windows.']],
+  ['Run a fleet', ['Fleet tab → Add driver (name, vehicle, reg, PCO).', 'Each driver links their own app numbers in Settings → App connections.', 'The fair-share router assigns offers to the first free, linked driver — and toggling a driver off-duty stops new offers instantly.']],
+  ['Sync your calendar', ['Diary → ⇅ Calendar feed → copy your personal .ics URL.', 'Google Calendar: “Other calendars +” → From URL. Apple: File → New Calendar Subscription.', 'To block time from another calendar, export it as .ics and use Import in the same panel.']],
+];
+function renderHowto() {
+  return `<div class="page-head"><div><h1 class="page-title">How-to guides</h1>
+    <div class="page-desc">Step-by-step for the everyday stuff. <a href="#/faq" style="color:var(--accent)">Read the FAQ →</a></div></div></div>
+    <div class="howto-grid">${HOWTO_GUIDES.map(([t, steps], i) => `<div class="howto card"><div class="h-n">${i + 1}</div><h3>${esc(t)}</h3><ol>${steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol></div>`).join('')}</div>`;
+}
+
+const BOT_KB = [
+  [['install', 'download', 'home screen', 'add to home'], 'Install in 10 seconds: iPhone → open the link in Safari → Share → “Add to Home Screen”. Android → open in Chrome → ⋮ → “Install app”. Then launch it from the icon like any app.'],
+  [['connect'], 'Settings → App connections: pick your driver, pick the app, enter the driver number that company issued you (e.g. UBR-4471290), save. Only linked apps will route work to that driver.'],
+  [['code', 'pickup code', 'secret'], 'Every booking has a 4-digit code. The rider sees it in their text/tracking page; ask for it at the door, open the booking and tap “Verify pickup”. It proves you’re each other’s ride.'],
+  [['tracking', 'track'], 'Riders follow you on a plain web page — no app. The link goes out automatically in the confirmation text (fflow.link/t/…) with live ETA, your vehicle and reg.'],
+  [['decline', 'expired', 'disappear'], 'Offers live 40–80 seconds like the real apps. Expired offers vanish; clashing offers are auto-declined to protect your rating. The centre-screen popup has a live countdown bar so you always know.'],
+  [['heatmap', 'demand', 'busy'], 'The Demand tab shows hour-by-hour demand per app across the week — brighter = busier. It blends your booking history with typical city rhythms.'],
+  [['calendar', 'google', 'apple', 'ics'], 'Diary → ⇅ Calendar feed: copy the URL and subscribe from Google/Apple Calendar. Or import an .ics file to block every app during outside commitments.'],
+  [['notification', 'alert', 'sound'], 'Tap the 🔔 in the top bar and allow notifications — bookings and requests then alert even when FareFlow is in the background.'],
+  [['fleet', 'driver', 'add'], 'Fleet tab → Add driver. Then Settings → App connections to link their app driver numbers. Off-duty toggle stops new jobs instantly while keeping existing bookings.'],
+  [['price', 'cost', 'free', 'pay'], 'This is a free early-access demo. Pro plans with 24/7 hosting and priority support come later — join the list on the marketing site (/get).'],
+  [['wake', 'slow', 'loading', 'stuck'], 'The demo host naps after ~15 quiet minutes — first load can take up to a minute and the app retries by itself. If it’s ever stuck past that, force-close and reopen once.'],
+];
+function supportSay(e) {
+  e.preventDefault();
+  const inp = document.getElementById('chatIn');
+  const t = inp.value.trim();
+  if (!t) return;
+  inp.value = '';
+  chatMsg('you', t);
+  const logD = document.getElementById('chatLog');
+  const tp = document.createElement('div');
+  tp.className = 'msg bot typing'; tp.textContent = 'typing…';
+  logD.appendChild(tp); logD.scrollTop = logD.scrollHeight;
+  setTimeout(() => { tp.remove(); chatMsg('bot', botReply(t)); }, 700 + Math.random() * 600);
+}
+function chatMsg(who, text) {
+  const logD = document.getElementById('chatLog');
+  if (!logD) return;
+  const d = document.createElement('div');
+  d.className = 'msg ' + who;
+  d.textContent = text;
+  logD.appendChild(d);
+  logD.scrollTop = logD.scrollHeight;
+}
+function botReply(t) {
+  const q = t.toLowerCase();
+  for (const [ks, a] of BOT_KB) if (ks.some((k) => q.includes(k))) return a;
+  return "I'm the demo helper bot and didn't quite catch that. Try asking about installing, connecting apps, pickup codes, tracking links, the heatmap, calendar, notifications or fleets — or open a ticket below and a human replies by email.";
+}
+async function sendTicket(e) {
+  e.preventDefault();
+  const subject = document.getElementById('tktSub').value.trim();
+  const message = document.getElementById('tktMsg').value.trim();
+  try {
+    const r = await api('/api/support/tickets', 'POST', { subject, message });
+    toast(`🎫 Ticket ${r.ticketNo} received — we'll reply by email within one working day`, 'ok');
+    document.getElementById('tktSub').value = '';
+    document.getElementById('tktMsg').value = '';
+  } catch (err) { toast(err.message, 'err'); }
+}
+function renderSupport() {
+  return `<div class="page-head"><div><h1 class="page-title">Help & support</h1>
+    <div class="page-desc">Chat below, call, email, or open a ticket — whatever's fastest. <a href="#/faq" style="color:var(--accent)">FAQ →</a> · <a href="#/howto" style="color:var(--accent)">How-to →</a></div></div></div>
+  <div class="support-grid">
+    <div class="card chat-card">
+      <div class="chat-log" id="chatLog">
+        <div class="msg bot">👋 You're through to FareFlow support. Ask me anything — installing the app, connecting your apps, pickup codes, tracking links… I answer instantly.</div>
+      </div>
+      <form class="chat-form" onsubmit="supportSay(event)">
+        <input id="chatIn" placeholder='Ask anything — e.g. "how do I connect Uber?"' autocomplete="off" maxlength="300">
+        <button class="btn primary sm" type="submit">Send</button>
+      </form>
+    </div>
+    <div class="support-side">
+      <a class="card contact" href="tel:+441614960800"><div class="big-ic">📞</div><div><b>Phone us</b><span>0161 496 0800 — daily 06:00–23:00<br><em>demo line</em></span></div></a>
+      <a class="card contact" href="mailto:support@fareflow.uk?subject=FareFlow%20support"><div class="big-ic">✉️</div><div><b>Email us</b><span>support@fareflow.uk<br>replies within one working day</span></div></a>
+      <div class="card contact" style="cursor:default;display:block"><div style="display:flex;gap:12px;align-items:center"><div class="big-ic">🎫</div><div><b>Open a ticket</b><span>tracked &amp; answered by email</span></div></div>
+        <form class="ticket-form" onsubmit="sendTicket(event)">
+          <input id="tktSub" placeholder="Subject — e.g. “booking code not showing”" required maxlength="120">
+          <textarea id="tktMsg" rows="3" placeholder="Tell us what happened, when, and on which screen…" required maxlength="2000"></textarea>
+          <button class="btn primary sm" type="submit" style="align-self:flex-end">Submit ticket</button>
+        </form>
+      </div>
+    </div>
+  </div>`;
 }
 
 window.addEventListener('hashchange', setRoute);

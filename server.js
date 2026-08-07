@@ -149,6 +149,7 @@ function load() {
     for (const c of Object.values(state.channels)) if (!c.apiKey) c.apiKey = crypto.randomBytes(12).toString('hex');
     for (const b of Object.values(state.blocks)) if (b.kind === 'booking' && !b.trackingToken) b.trackingToken = uid('trk');
     if (!state.users || !state.users.length) state.users = defaultUsers();
+    if (!state.supportTickets) state.supportTickets = [];
     if (!state.sessions) state.sessions = {};
     { // driver connections migration
       const defs = defaultConnections();
@@ -225,6 +226,20 @@ function notifyBooking(block, via) {
     driverId: block.driverId, driver: drv ? drv.name.split(' ')[0] : 'Driver',
     pickup: placeName(block.pickup), dropoff: placeName(block.dropoff),
     start: block.start, durationMin: block.durationMin, distanceMi: block.distanceMi,
+  });
+}
+/* pop an incoming request on every connected screen the moment it lands */
+function notifyRequest(req) {
+  const ch = state.channels[req.channelId] || CHANNEL_CATALOG[req.channelId] || { name: req.channelId, color: '#38BDF8' };
+  const drv = driverById(req.driverId);
+  broadcast('request', {
+    id: req.id, via: req.via || 'live',
+    rider: req.rider, fare: req.fare, code: req.code,
+    channelId: req.channelId, channel: ch.name, color: ch.color,
+    driverId: req.driverId, driver: drv ? drv.name.split(' ')[0] : 'Driver',
+    pickup: placeName(req.pickup), dropoff: placeName(req.dropoff),
+    pickupAt: req.pickupAt, expiresAt: req.expiresAt,
+    durationMin: req.durationMin, distanceMi: req.distanceMi, asap: !!req.asap,
   });
 }
 
@@ -452,6 +467,7 @@ function createRequest(o) {
   }
   broadcast('state'); save();
 
+  if (req.status === 'pending') notifyRequest(req);
   if (req.status === 'pending' && req.driverId && state.settings.autoAccept) {
     const ppm = req.fare / req.distanceMi;
     if (ppm >= state.settings.minPerMile) {
@@ -825,6 +841,18 @@ const server = http.createServer(async (req, res) => {
         log('info', `${u.name} signed in`);
         save();
         return send(res, 200, { ok: true, me: { id: u.id, name: u.name, email: u.email, phone: u.phone, driverId: u.driverId } });
+      }
+      if (p === '/api/support/tickets') {
+        const subject = String(body.subject || '').trim().slice(0, 120);
+        const message = String(body.message || '').trim().slice(0, 2000);
+        if (!subject || !message) return send(res, 400, { error: 'A subject and message are required' });
+        const me = sessionUser(req);
+        const no = 1000 + state.supportTickets.length + 1;
+        state.supportTickets.unshift({ id: uid('tkt'), no, subject, message, from: me ? { name: me.name, email: me.email, phone: me.phone } : null, t: iso(now()), status: 'open' });
+        if (state.supportTickets.length > 200) state.supportTickets.length = 200;
+        log('info', `Support ticket FF-${no} opened${me ? ` by ${me.name}` : ''}`);
+        save();
+        return send(res, 200, { ok: true, ticketNo: `FF-${no}` });
       }
       if (p === '/api/auth/register') {
         const name = String(body.name || '').trim();
