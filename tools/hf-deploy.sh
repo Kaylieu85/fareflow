@@ -1,13 +1,15 @@
 #!/bin/sh
-# One-command Hugging Face Spaces deploy. Usage:
+# One-command Hugging Face Spaces deploy/mirror. Usage:
 #   HF_USER=yourname HF_SPACE=fareflow HF_TOKEN=hf_xxx sh tools/hf-deploy.sh
+#   HF_SDK=static (docker runtime needs HF PRO; static repos are free and work as public git mirrors)
 set -e
 : "${HF_USER:?set HF_USER}" "${HF_SPACE:?set HF_SPACE}" "${HF_TOKEN:?set HF_TOKEN}"
+SDK="${HF_SDK:-docker}"
 REPO="spaces/$HF_USER/$HF_SPACE"
-echo "== creating $REPO (safe if it already exists) =="
+echo "== creating $REPO (sdk=$SDK, safe if it already exists) =="
 curl -s -X POST "https://huggingface.co/api/repos/create" \
   -H "Authorization: Bearer $HF_TOKEN" -H "Content-Type: application/json" \
-  -d "{\"type\":\"space\",\"name\":\"$HF_SPACE\",\"sdk\":\"'${HF_SDK:-docker}'\",\"private\":false}" | head -c 240; echo
+  -d "{\"type\":\"space\",\"name\":\"$HF_SPACE\",\"sdk\":\"$SDK\",\"private\":false}" | head -c 240; echo
 [ -d .git ] || git init -q
 git config user.email "fareflow@deploy.local"
 git config user.name "FareFlow Deploy"
