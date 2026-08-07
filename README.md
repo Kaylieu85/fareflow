@@ -37,12 +37,12 @@ Everything needed is already in the repo; pick whichever free host you have an a
 
 | Host | How | Needs |
 |---|---|---|
-| **Hugging Face Spaces** | New Space → SDK **Docker** → push this repo (the README front-matter + `Dockerfile` do the rest). Permanent `https://\<you\>-fareflow.hf.space` URL. | free HF account |
-| **Render** | New → **Blueprint** → point at the git repo (`render.yaml` included). Free plan. | free GitHub + Render accounts |
+| **GitHub → Render (current setup)** | Code on GitHub, Docker builds on Render's free plan. Deploy new code: push to `main`, then `POST /v1/services/{id}/deploys` with your Render API key (no repo webhook without OAuth — see TESTING guide). | free GitHub + Render accounts — **live at https://kaylieu-fareflow.onrender.com** |
+| **Hugging Face Spaces** | Same `Dockerfile` works (SDK **Docker**); note Docker Spaces need HF **PRO** ($9/mo) since free CPU only runs static Spaces. | HF PRO |
 | **Railway / Fly.io / any VPS** | Auto-detected (`Procfile`/`Dockerfile`). | account |
 | **Plain Docker anywhere** | `docker build -t fareflow . && docker run -p 3000:7860 fareflow` | Docker |
 
-After deploying, **re-point the QR codes once** and they work forever:
+QR codes were regenerated against the live URL. After any future domain change, **re-point the QR codes once** and they work forever:
 
 ```bash
 python3 tools/gen_qr.py "https://your-permanent-url/"

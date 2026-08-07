@@ -6,7 +6,10 @@ FareFlow is a **PWA (Progressive Web App)** — no app store needed. You install
 
 ### Where to open it
 
-Open the app's live URL on your phone (the same address shown in the live preview panel here — it runs on port 3000 over HTTPS, which is what PWA install requires).
+**Permanent link: https://kaylieu-fareflow.onrender.com**
+
+Marketing/download page: `https://kaylieu-fareflow.onrender.com/get`
+> Free-tier note: after ~15 quiet minutes the app naps — the first tap takes up to ~60s to wake it, then it's instant.
 
 ### Android (Chrome / Edge / Samsung Internet)
 
