@@ -3,7 +3,7 @@ FROM node:20-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 
-COPY --chown=node:node server.js package.json ./
+COPY --chown=node:node server.js legal.js package.json ./
 COPY --chown=node:node public ./public
 COPY --chown=node:node tools/materialize.js tools/assets-b64.json ./tools/
 
