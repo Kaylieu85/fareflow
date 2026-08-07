@@ -132,6 +132,7 @@ function freshState() {
     cities: CITIES,
     users: defaultUsers(), sessions: {},
     channels, requests: {}, requestOrder: [], blocks: {}, messages: [], logs: [], webhookLog: [],
+    supportTickets: [],
   };
 }
 let state = null;
